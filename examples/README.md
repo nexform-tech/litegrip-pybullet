@@ -93,23 +93,52 @@ You set the target in the PyBullet window; pressing Enter sends it.
    speed the hardware will move at. The hardware has not moved yet.
 2. Drag the **force** slider. It becomes the feed-forward torque sent with the
    frame.
-3. Press **Enter** or **Space** to send. The hardware streams toward the target
-   for `--duration` seconds at 200 Hz. The simulation shows the *commanded*
-   opening while the hardware's measured opening is displayed next to it; the
-   gap between the two is the tracking error, and it stays open while the fingers
-   are blocked by a part — which is how you tell you have gripped something.
+3. Press **Enter** or **Space** to send. The hardware **ramps** toward the target
+   at 200 Hz — slow enough by default to keep the fingers at or under 85 mm/s
+   (`--duration` can ask for slower, never for faster) — then holds and pushes.
+   The simulation shows the *commanded* opening while the hardware's measured
+   opening is displayed next to it; the gap between the two is the tracking
+   error, and it stays open while the fingers are blocked by a part — which is
+   how you tell you have gripped something.
 4. Press **Esc** or **Q** to quit. Frame sending stops and the motor holds its
    position.
 
 ```bash
 python3 examples/02_sim_to_real.py --dry-run         # window only, never touches CAN
-python3 examples/02_sim_to_real.py                   # can0, 10 N, 1 s
+python3 examples/02_sim_to_real.py                   # can0, 10 N, automatic speed
 python3 examples/02_sim_to_real.py --force 20 --duration 2
 python3 examples/02_sim_to_real.py --channel can1    # a different CAN port
 ```
 
 `--headless` is refused: the sliders are the input device, and a DIRECT
 connection has no sliders. Use 01 for a headless run.
+
+#### Why it ramps
+
+The MIT position term is `kp × (q_target − q_actual)` with `kp = 100 Nm/rad`.
+Sending the target as a step means the first frame asks for
+`100 × 1.845 rad ≈ 185 Nm` on a motor rated around 10 Nm. The current saturates,
+the motor latches an under-voltage/over-current fault, and it then keeps
+reporting its position while ignoring every command — the blinking red LED and
+"it reads but I can't control it" symptom. This example ramps like the SDK's
+`goto_rad` does: each frame advances one tick from where the motor *is*, so a
+single frame demands under 1 Nm.
+
+#### If a wedged gripper reads but won't move
+
+```bash
+python3 examples/02_sim_to_real.py --status                  # read only, sends nothing
+python3 examples/02_sim_to_real.py --status --clear-fault    # clear the latched fault
+```
+
+`--status` opens no window, does not enable the motor and **sends no motion
+command at all** — it just reads the error code and translates it, so it is safe
+to run while the gripper holds a part or is in someone's hands. Only
+`--clear-fault` sends frames, and those are all zero-torque; but the SDK's clear
+sequence is disable → clear → enable, so the motor goes limp for an instant and
+the fingers may drift under their own weight. Support the gripper first.
+
+The fault is latched: it will not clear itself until the gripper is power-cycled.
 
 The example drives the CAN loop itself, with the SDK's public
 `send_mit_frame()` + `poll()`, rather than calling `move_to()`/`goto_rad()`. Those

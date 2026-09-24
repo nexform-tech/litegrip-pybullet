@@ -139,6 +139,52 @@ class TestExample02NeedsAWindow:
         assert "01_sim_only.py" in text
 
 
+class TestExample02Status:
+    """``--status`` diagnoses a wedged gripper without commanding it.
+
+    Nothing here can reach hardware: the interface name cannot exist, so the
+    run stops at ``connect()``.  What is being pinned is that ``--status``
+    never gets as far as enabling the motor or printing the motion banner, and
+    that the argument combinations are refused rather than silently ignored.
+    """
+
+    @pytest.fixture
+    def missing_interface(self) -> subprocess.CompletedProcess:
+        result = run(EXAMPLE_02, "--status", "--channel", NOWHERE)
+        if "找不到真机 SDK" in output_of(result):
+            pytest.skip("装真机 SDK 才能测到连 CAN 这一步（pip install litegrip）")
+        return result
+
+    def test_it_is_documented(self):
+        assert "--status" in run(EXAMPLE_02, "--help").stdout
+
+    def test_a_missing_can_interface_is_reported_clearly(self, missing_interface):
+        assert missing_interface.returncode == 1
+        assert NOWHERE in output_of(missing_interface)
+
+    def test_it_never_enables_the_motor(self, missing_interface):
+        """The whole point: a wedged motor must not be poked, only read."""
+        text = output_of(missing_interface)
+        assert "已使能" not in text
+        assert "即将驱动真机" not in text            # the motion banner
+        assert "未使能" in text or "不发送任何帧" in text or NOWHERE in text
+
+    def test_clear_fault_without_status_is_refused(self):
+        result = run(EXAMPLE_02, "--clear-fault")
+        assert result.returncode == 1
+        assert "--status" in output_of(result)
+
+    def test_status_with_dry_run_is_refused(self):
+        result = run(EXAMPLE_02, "--status", "--dry-run")
+        assert result.returncode == 1
+        text = output_of(result)
+        assert "--dry-run" in text
+
+    def test_a_future_duration_is_announced_as_a_rate_limit(self):
+        """``--duration`` is a floor on speed, not a promise to go faster."""
+        assert "mm/s" in run(EXAMPLE_02, "--help").stdout
+
+
 class TestExample03WithoutHardware:
     """03 imports the SDK before it looks at the CAN interface.
 

@@ -80,9 +80,19 @@ What has been verified, and what has not:
 | Speed-limited motion | ✅ Verified | `tests/test_sim.py`: full stroke 1.00 s of ramp + ~0.13 s of servo settling, no overshoot |
 | Force cap and friction grasping | ✅ Verified | Holds 5 N against a 10 N grip, slips at 15 N; only the fingers touch the part |
 | Example 01 | ✅ Verified | Runs headless, exits 0, all four demos asserted in `tests/test_examples_cli.py` |
-| Example 02 (simulation → hardware) | ⚠️ **Not verified** | Never executed against hardware. `--dry-run` path and CLI only |
+| Example 02 (simulation → hardware) | ⚠️ **Partially verified** | Run against a real gripper on `can0`, where it latched a motor fault; the ramp fix below is covered by `tests/test_example02_stream.py` but has **not** itself been run against hardware |
+| Example 02 `--status` diagnostics | ⚠️ **Partially verified** | `--status` on a real gripper reaches `connect()` and reports a missing CAN interface correctly; reading and clearing a latched fault has not been exercised on hardware |
 | Example 03 (hardware → simulation) | ⚠️ **Partially verified** | The read-only mirror path was run against a real gripper on `can0`; `--zero-gravity` was not |
-| Real-hardware commands (`goto`, force feed-forward) | ⚠️ **Not verified** | No motion command has been sent to hardware from this repository |
+| Real-hardware motion commands | ⚠️ **Partially verified** | A step-command stream was sent to hardware from an earlier revision of example 02 and faulted the motor; the ramped replacement has not been run yet |
+
+A step command (the whole target in one frame) sets up a fault here: the MIT
+position term `kp × (q_target − q_actual)` at `kp = 100 Nm/rad` over a 1.845 rad
+travel asks for ~185 Nm from a ~10 Nm motor. It latches an
+under-voltage/over-current fault, after which the gripper still reports its
+position and ignores every command. Example 02 ramps like the SDK's own
+`goto_rad`, one tick per frame, so a single frame demands under 1 Nm; the fault
+is recoverable without moving the motor via
+`examples/02_sim_to_real.py --status --clear-fault`.
 
 The simulation dynamics are PyBullet's, with the URDF's own inertias. The
 finger speed limit and the force cap are enforced by this library; the reported

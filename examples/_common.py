@@ -155,13 +155,18 @@ def add_hardware_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def open_real_gripper(args: argparse.Namespace):
+def open_real_gripper(args: argparse.Namespace, enable: bool = True):
     """按命令行参数连接真机夹爪：connect → load_calibration → enable。
 
     任一步失败都打印可读的原因并 ``SystemExit(1)``，不会抛裸异常。
 
+    Args:
+        args: 命令行参数（``--channel`` / ``--can-id`` / ``--mst-id`` / ``--calib``）。
+        enable: 是否使能。``False`` 时只连接并载入标定，**一个 CAN 帧都不发**，
+            电机保持原状——用来在不动电机的前提下先看看状态。
+
     Returns:
-        已使能的 ``litegrip.LiteGrip``。
+        ``litegrip.LiteGrip``（``enable=True`` 时已使能）。
     """
     litegrip = import_litegrip()
 
@@ -183,6 +188,9 @@ def open_real_gripper(args: argparse.Namespace):
         # 标定必须在 enable 之前载入：SDK 的毫米刻度依赖它
         gripper.load_calibration(args.calib)
         check_calibration(gripper)   # 标定不对的话，下面的目标角就没意义
+        if not enable:
+            print("[真机] 已连接、已载入标定（未使能，不发送任何帧）")
+            return gripper
         if not gripper.enable():
             raise SystemExit("❌ 使能失败：夹爪可能处于错误状态或未上电")
     except SystemExit:
