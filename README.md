@@ -82,17 +82,28 @@ What has been verified, and what has not:
 | Example 01 | ✅ Verified | Runs headless, exits 0, all four demos asserted in `tests/test_examples_cli.py` |
 | Example 02 (simulation → hardware) | ⚠️ **Partially verified** | Run against a real gripper on `can0`, where it latched a motor fault; the ramp fix below is covered by `tests/test_example02_stream.py` but has **not** itself been run against hardware |
 | Example 02 `--status` diagnostics | ⚠️ **Partially verified** | `--status` on a real gripper reaches `connect()` and reports a missing CAN interface correctly; reading and clearing a latched fault has not been exercised on hardware |
-| Example 03 (hardware → simulation) | ⚠️ **Partially verified** | The read-only mirror path was run against a real gripper on `can0`; `--zero-gravity` was not |
+| Example 03 (hardware → simulation) | ⚠️ **Partially verified** | The read-only mirror path was run against a real gripper on `can0`; `--zero-gravity` and `--passive` were not |
 | Real-hardware motion commands | ⚠️ **Partially verified** | A step-command stream was sent to hardware from an earlier revision of example 02 and faulted the motor; the ramped replacement has not been run yet |
+| Idle keep-alive (`IdleKeeper`, 03's hold frames) | ⚠️ **Partially verified** | Unit-tested for cadence and for the gap staying under the timeout; **never run against hardware** |
 
-A step command (the whole target in one frame) sets up a fault here: the MIT
-position term `kp × (q_target − q_actual)` at `kp = 100 Nm/rad` over a 1.845 rad
-travel asks for ~185 Nm from a ~10 Nm motor. It latches an
-under-voltage/over-current fault, after which the gripper still reports its
-position and ignores every command. Example 02 ramps like the SDK's own
-`goto_rad`, one tick per frame, so a single frame demands under 1 Nm; the fault
-is recoverable without moving the motor via
-`examples/02_sim_to_real.py --status --clear-fault`.
+"Reads the position but won't take commands, red LED blinking" has two lookalike
+causes on this hardware:
+
+- **A step command** (the whole target in one frame): the MIT position term
+  `kp × (q_target − q_actual)` at `kp = 100 Nm/rad` over a 1.845 rad travel asks
+  for ~185 Nm from a ~10 Nm motor, which latches an under-voltage/over-current
+  fault (0x9/0xA). Example 02 ramps like the SDK's own `goto_rad`, one tick per
+  frame, so a single frame demands under 1 Nm.
+- **Idling too long**: the `TIMEOUT` register (RID 9, measured 8000 ms here) is a
+  CAN watchdog — that long with no frame received latches a communication-loss
+  fault (**0xD**, a code the SDK's `describe_error` does not yet know). **A quiet
+  idle period is itself the fault cause**, and it was the dominant one behind
+  "simulation can read the gripper but not control it." Both examples now send
+  hold frames (target = measured position, zero feed-forward) while idle; 03's
+  `--passive` opts out of that when another program is driving the bus.
+
+Both faults are diagnosed and cleared without moving the motor via
+`examples/02_sim_to_real.py --status [--clear-fault]`.
 
 The simulation dynamics are PyBullet's, with the URDF's own inertias. The
 finger speed limit and the force cap are enforced by this library; the reported

@@ -186,6 +186,14 @@ class StreamMove:
 #: ``move_at_speed`` 同一把尺子，也让真机走的速度和窗口里预览的速度一致。
 RATED_SPEED_MM_S = 85.0
 
+#: 空闲时也必须持续发帧 [Hz]，和运动时同频。
+#:
+#: ⚠️ 电机的 ``TIMEOUT`` 寄存器（DM 寄存器表 RID 9，这台机器读出来是 8000）
+#: = CAN 通信超时保护：**连续这么久没收到帧就锁进通信丢失故障**——红灯闪、位置
+#: 照读、指令一律不执行。空闲不发帧 = 在窗口里多看几秒就把真机看哑了。
+#: SDK 的 ``control_mit_stream`` 和 LiteGrip 控制台都是持续发帧的，正是为此。
+IDLE_HZ = FRAME_HZ
+
 #: 保持段的默认时长 [s]：到位后加力顶住的时间。
 DEFAULT_HOLD_S = 0.5
 
@@ -227,6 +235,62 @@ def fault_of(state) -> str | None:
     if not state.is_error:
         return None
     return f"{describe_code(state.error_code)} (0x{state.error_code:X})"
+
+
+def hold_frame(gripper) -> tuple[float, float, float, float, float]:
+    """「锁在当前位置」的一帧：``(q, kp, kd, dq, tau)``。
+
+    目标就是电机**现在**的位置、零速度、零前馈——命令出来的一瞬间误差为零，所以
+    不会产生任何运动，只是让手指有刚度、并且把电机的通信超时计数器喂上。
+
+    这是空闲时的保活帧，也是 :meth:`LiteGrip.exit_zero_gravity` 说的「锁在当前
+    位」。用它而不是 ``kp=0``：``kp=0`` 会让手指变软，可能在自重下自己出溜。
+    """
+    cfg = gripper.config
+    position_rad = gripper.get_state(wait=False).position_rad
+    return (position_rad, cfg.kp, cfg.kd, 0.0, 0.0)
+
+
+class IdleKeeper:
+    """空闲保活：没有指令在走的时候，照样按 :data:`IDLE_HZ` 接着发帧。
+
+    ⚠️ 这不是可选的优化，是必须的。电机的 ``TIMEOUT`` 寄存器（本机读出来 8000
+    ms）是 CAN 通信超时保护：连续这么久收不到帧，电机就锁进通信丢失故障——位置
+    照读、指令不执行、红灯闪。在窗口里多看一眼就够触发，而且**发再多帧也解不开**
+    （得显式清故障）。SDK 的 ``control_mit_stream`` 和 LiteGrip 控制台都是持续
+    发帧的，正是为此。
+
+    发什么：优先「接着上一条指令的最后一帧发」——这样夹持力不会因为空闲而松掉；
+    还没下发过指令时发一条锁位帧（目标 = 实测位置、零前馈），不命令任何运动。
+    """
+
+    def __init__(self, gripper, hz: float = IDLE_HZ) -> None:
+        self.gripper = gripper
+        self.frame = hold_frame(gripper)
+        self.interval = 1.0 / hz
+        self.last_sent = float("-inf")
+        self.frames = 0
+        self.dropped = 0
+
+    def remember(self, move: "StreamMove") -> None:
+        """记住这条指令的最后一帧，之后接着按它发。"""
+        self.frame = (move.target_rad, move.kp, move.kd, 0.0, move.tau_nm)
+
+    def maybe_send(self, now: float) -> bool | None:
+        """到点就发一帧。
+
+        Returns:
+            True/False = 发出去/没发出去（未使能、已断开）；None = 还没到点。
+        """
+        if now - self.last_sent < self.interval:
+            return None
+        self.last_sent = now
+        q, kp, kd, dq, tau = self.frame
+        if self.gripper.send_mit_frame(q=q, kp=kp, kd=kd, dq=dq, tau=tau):
+            self.frames += 1
+            return True
+        self.dropped += 1
+        return False
 
 
 def make_sliders(gripper, default_force_n: float) -> tuple[int, int]:
@@ -272,14 +336,36 @@ def real_line(fraction: float, force_n: float, moving: bool) -> str:
     )
 
 
+def read_registers(gripper) -> dict[str, float]:
+    """读几个 DM 寄存器，读不到的跳过（**只发读请求，不是运动指令**）。
+
+    ``TIMEOUT`` 是重点：它就是「连续多久收不到帧就锁故障」的那个值。样例 02/03
+    空闲时必须持续发帧，正是为了不让它到期。
+    """
+    from litegrip.can.protocol import DM_REG
+
+    wanted = ("TIMEOUT", "CTRL_MODE", "UV_Value", "OC_Value", "OT_Value")
+    out: dict[str, float] = {}
+    for name in wanted:
+        rid = getattr(DM_REG, name, None)
+        if rid is None:
+            continue
+        try:
+            out[name] = float(gripper.read_param(int(rid), timeout_s=0.5))
+        except Exception:
+            pass          # 读不到就算了，不能因为一个寄存器把诊断搞挂
+    return out
+
+
 def run_status(args: argparse.Namespace) -> int:
     """``--status``：只连接、只读，诊断真机为什么「能读不能控」。
 
-    正常情况下**一个 CAN 帧都不发**：``open_real_gripper(enable=False)`` 只做
-    connect + load_calibration + 轮询读状态，不使能、不下发。所以这条路径不会让
-    电机产生任何运动，可以在夹着工件、或手指在别人手里的时候安全地跑。
+    这条路径**不使能、不发运动指令、不开窗口**：``open_real_gripper(enable=False)``
+    只做 connect + load_calibration，之后只轮询状态帧和读寄存器（DM 的读请求
+    0x33，属于询问，不是指令）。所以电机不会产生任何运动，可以在夹着工件、或
+    手指在别人手里的时候安全地跑。
 
-    加 ``--clear-fault`` 才会发帧，发的也只是 SDK 的故障清除序列——全程
+    加 ``--clear-fault`` 才会写：发的也只是 SDK 的故障清除序列——全程
     ``kp=0/kd=0/tau=0`` 的零力矩帧，**不命令任何运动**。但要说清楚：
     ``clear_fault()`` 内部是 disable → clear → enable，中间那一瞬间电机是失力
     的，手指可能因自重轻微滑动。夹着东西或需要保持位置时先托住再清。
@@ -307,6 +393,17 @@ def run_status(args: argparse.Namespace) -> int:
         ))
         print(f"   错误码 0x{state.error_code:X} · "
               f"{describe_code(state.error_code)}")
+
+        registers = read_registers(gripper)
+        if registers:
+            shown = " · ".join(f"{k}={v:g}" for k, v in registers.items())
+            print(f"   寄存器 {shown}")
+        timeout_ms = registers.get("TIMEOUT")
+        if timeout_ms:
+            print(f"   ⏱  通信超时保护 = {timeout_ms:g} ms：连续这么久收不到帧，"
+                  f"电机会锁进通信丢失故障（位置照读、指令不执行、红灯闪）。\n"
+                  f"      样例 02/03 空闲时也在持续发帧，就是为了不让它到期；\n"
+                  f"      只读不喂帧（或跑了别的只读脚本）同样会把它看哑。")
 
         if not state.is_error:
             print("   ✅ 没有故障。真机能正常接受指令——想动它就直接跑本样例"
@@ -393,7 +490,8 @@ def main() -> int:
     last_sent = 0.0
     last_print = 0.0
     sent_count = 0
-    aborted = False    # 因电机故障中止
+    faulted = False    # 真机报故障：停发、不再对着不听话的电机发帧
+    keeper = None if gripper is None else IdleKeeper(gripper)
 
     try:
         while sim.connected():
@@ -424,6 +522,7 @@ def main() -> int:
                     if fault:
                         # 锁死的故障下，发什么都白搭，还会掩盖真正的原因
                         move = None
+                        faulted = True
                         print(f"\n❌ 真机报故障：{fault}")
                         print("   故障是锁死的：位置照读，但电机不执行任何指令。"
                               "请先清故障再下发：")
@@ -468,26 +567,39 @@ def main() -> int:
                           f"{'发完' if not move.dropped else '只发出'} "
                           f"{move.frames} 帧"
                           + (f"（丢 {move.dropped} 帧）" if move.dropped else ""))
+                    # 空闲保活接着按这条指令的最后一帧发：夹持力不会因为
+                    # 「空闲」而松掉，电机也不会因为收不到帧而锁超时故障。
+                    keeper.remember(move)
                     move = None
+            elif keeper is not None and not faulted:
+                # 空闲保活。见 :class:`IdleKeeper`：停发 = 等电机的通信超时
+                # 保护把真机锁成故障态。
+                if keeper.maybe_send(now) is False and keeper.dropped == 1:
+                    print("   ⚠️ 空闲保活帧没发出去（send_mit_frame 返回 "
+                          "False）：真机可能未使能或已断开")
 
             real = read_real(gripper)
             if real is None:
                 sim.status_text(f"命令 {target_fraction * 100:5.1f}%  （dry-run）")
             else:
                 real_fraction, real_force_n, real_moving, fault = real
-                if fault and move is not None:
-                    # 走着走着进了故障态：立刻停发，别再对着死电机发帧了
-                    print(f"\n❌ 真机中途报故障：{fault}")
+                if fault and not faulted:
+                    # 进了故障态：立刻停发，别再对着不听话的电机发帧了。
+                    # 窗口留着不关，好让人把上面这些字读完。
+                    print(f"\n❌ 真机报故障：{fault}")
                     print("   已停止发帧。清故障（不动电机）："
                           "examples/02_sim_to_real.py --status --clear-fault")
                     move = None
-                    aborted = True
-                    break
+                    faulted = True
 
                 if move is not None:
                     phase = "加力中" if move.in_hold(now) else "斜坡中"
+                elif faulted:
+                    phase = "故障"
+                elif real_moving:
+                    phase = "锁位·真机在动"
                 else:
-                    phase = "运动中" if real_moving else "停住"
+                    phase = "锁位中"
                 sim.status_text(
                     f"命令 {target_fraction * 100:5.1f}%   "
                     f"真机 {real_fraction * 100:5.1f}%   "
@@ -510,7 +622,7 @@ def main() -> int:
             print("[真机] 已停止发帧并断开")
         sim.disconnect()
 
-    if aborted:
+    if faulted:
         return 1
     if sent_count == 0:
         print("\n一条指令都没下发过：滑条调好后要按 Enter 才下发。")

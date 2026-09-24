@@ -211,6 +211,21 @@ class TestExample03WithoutHardware:
         assert "已使能" not in text
         assert "即将驱动真机" not in text
 
+    def test_passive_is_documented_and_says_what_it_means(self):
+        """``--passive`` is the escape hatch when another program drives CAN."""
+        stdout = run(EXAMPLE_03, "--help").stdout
+        assert "--passive" in stdout
+        assert "一帧都不发" in stdout
+        # ...and it warns that running it alone leaves nobody feeding the motor
+        assert "通信超时" in stdout
+
+    def test_passive_still_reports_a_missing_interface(self):
+        """Suppressing the sends must not suppress connecting or the error."""
+        result = run(EXAMPLE_03, "--passive", "--channel", NOWHERE,
+                     "--duration", "1")
+        assert result.returncode == 1
+        assert NOWHERE in output_of(result)
+
     def test_without_the_sdk_it_says_how_to_get_it(self):
         """The SDK-absent path is worth covering too — CI is exactly that case."""
         result = run(EXAMPLE_03, "--channel", NOWHERE, "--duration", "1")

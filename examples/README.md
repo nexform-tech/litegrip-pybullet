@@ -140,6 +140,42 @@ the fingers may drift under their own weight. Support the gripper first.
 
 The fault is latched: it will not clear itself until the gripper is power-cycled.
 
+##### Two faults look identical and are not
+
+| Code | Meaning | What triggers it |
+| --- | --- | --- |
+| 0x9 / 0xA | under-voltage / over-current | a step command: ~185 Nm in one frame on a ~10 Nm motor |
+| **0xD** | **communication loss** (the SDK's `describe_error` does not know it yet) | 8 s with no frame received — including "just watching with the window open" |
+
+0xD is the `TIMEOUT` register's CAN watchdog: **idling is itself the fault
+cause.** This example therefore keeps sending hold frames at 200 Hz through its
+idle periods (target = measured position, zero feed-forward, no motion
+commanded) — see `IdleKeeper`. Earlier revisions sent nothing, so the quiet
+stretch after `enable()`'s priming frame — PyBullet starting up plus a few
+seconds of looking at the window — went past 8000 ms and wedged the motor. That,
+not the ramp, was the main cause of "simulation can read the gripper but not
+control it."
+
+`--status` prints the register rather than leaving you to guess:
+
+```
+   ⏱  通信超时保护 = 8000 ms：连续这么久收不到帧，电机会锁进通信丢失故障
+      （位置照读、指令不执行、红灯闪）
+```
+
+A **second master** on the same bus makes the symptom messier still: the two
+streams fight and neither side wins. Before running a hardware example, check
+nothing else (say `litegrip_console --backend real`) is on the same CAN
+interface:
+
+```bash
+pgrep -af python3 | grep -i litegrip        # who has CAN open
+ip -details -statistics link show can0      # busy bus? counters climbing while you run nothing means someone else is talking
+```
+
+`ip link set can0 down` / `up` does **not** evict that program — its socket
+survives and it resumes when the interface returns. The process has to exit.
+
 The example drives the CAN loop itself, with the SDK's public
 `send_mit_frame()` + `poll()`, rather than calling `move_to()`/`goto_rad()`. Those
 run `control_mit_stream()` internally, which sleeps in its own 5 ms loop and never
@@ -158,20 +194,39 @@ Two ways to use it:
 - **Push it by hand** (`--zero-gravity`, recommended): the motor goes slack and
   you can move the fingers yourself. The window follows your hand. Press **Z**
   while running to toggle slack/enabled.
-- **Watch another program drive it**: without `--zero-gravity` the hardware holds
-  its own position, and if something else is commanding it, the window follows.
+- **Watch another program drive it** (`--passive`): this example sends nothing at
+  all and leaves the feeding to that program.
 
 ```bash
 python3 examples/03_real_to_sim.py --zero-gravity   # push it by hand
-python3 examples/03_real_to_sim.py                  # mirror only, never commands
+python3 examples/03_real_to_sim.py                  # mirror (hold frames keep it alive)
+python3 examples/03_real_to_sim.py --passive        # send nothing, let someone else feed it
 python3 examples/03_real_to_sim.py --headless       # terminal readings only
 python3 examples/03_real_to_sim.py --duration 10    # stop after 10 s
 ```
 
-The default path is read-only apart from keeping the motor energised: it sends no
-position commands. `--zero-gravity` (or Z) is the one that changes the hardware's
-behaviour — it makes the gripper *soft*, so the fingers can be back-driven and
-can also sag under gravity. Support the gripper before enabling it.
+#### Why "just watching" still has to send frames
+
+The motor's `TIMEOUT` register (RID 9, measured **8000 ms** on this machine) is a
+CAN watchdog: **that long with no frame received latches a communication-loss
+fault** — again a blinking red LED, positions that still read, and commands that
+are silently ignored. A few seconds of watching the PyBullet window is enough to
+wedge the gripper.
+
+So the default mode is not read-only: it sends "**locked at the measured
+position**" hold frames at 200 Hz — target where the fingers already are, zero
+velocity, zero feed-forward. It commands no motion; it just gives the fingers
+stiffness and keeps the watchdog fed. To back-drive it instead, add
+`--zero-gravity` (or press Z), which streams the same way with kp/kd zeroed.
+
+Use `--passive` when a **different program** is driving the hardware: this example
+then sends no frames and disables the Z key, so the two never fight over the bus.
+The cost is that the other program has to feed the motor itself, or it latches
+after 8 s anyway. **Do not combine `--passive` with running this example alone.**
+
+`--zero-gravity` (or Z) makes the gripper *soft*, so the fingers can be
+back-driven and can also sag under gravity. Support the gripper before enabling
+it.
 
 Quitting restores the motor (`exit_zero_gravity()`) so the gripper holds its
 position rather than going limp.

@@ -11,8 +11,15 @@
   * **用手推着看**（推荐，最能看出镜像效果）：加 ``--zero-gravity``，真机的
     电机失力，可以用手推动手指；仿真窗口会跟着你的手走。运行中按 **Z** 也能
     随时切换失力/使能。
-  * **看别人的程序驱动**：不加 ``--zero-gravity`` 时真机自己保持位置；如果
-    有另一个程序（或你的上位机）在给真机发指令，仿真同样会跟着显示。
+  * **看别人的程序驱动**：加 ``--passive``，本样例一帧都不发，只读；由那个
+    程序去喂真机。
+
+⚠️ 为什么必须持续发帧（默认模式）：电机的 ``TIMEOUT`` 寄存器（RID 9，本机实测
+8000）= CAN 通信超时保护，**连续这么久收不到帧就锁进通信丢失故障**——红灯闪、
+位置照读、指令一律不执行。所以「只是看」也得喂帧，见 :data:`FRAME_HZ`。默认
+模式发的是「锁在实测位置」的保持帧（零前馈、目标就是它现在的位置），不命令任何
+运动，但会让手指有刚度、推它它会顶回来。要看别人的程序驱动就用 ``--passive``，
+否则两边发的帧会互相打架。
 
 按键：
   Z         真机失力（可用手推）/ 恢复使能
@@ -23,7 +30,8 @@
 
 运行：
   python3 examples/03_real_to_sim.py --zero-gravity     # 用手推，仿真跟着动
-  python3 examples/03_real_to_sim.py                    # 只镜像，不碰真机
+  python3 examples/03_real_to_sim.py                    # 只镜像（发锁位帧保活）
+  python3 examples/03_real_to_sim.py --passive          # 一帧不发，等别人喂
   python3 examples/03_real_to_sim.py --headless         # 无窗口，只看终端读数
   python3 examples/03_real_to_sim.py --duration 10      # 看 10 s 后自动退出
 """
@@ -47,8 +55,17 @@ from litegrip_pybullet import (
 )
 
 #: 发 MIT 帧 / 刷新镜像的频率 [Hz]，和 SDK 自己的流式循环一致。
+#:
+#: ⚠️ 这个频率不只是「运动时才用」：电机的 ``TIMEOUT`` 寄存器（DM 寄存器表
+#: RID 9，这台机器实测 8000）= CAN 通信超时保护，**连续这么久收不到帧就锁进
+#: 通信丢失故障**——红灯闪、位置照读、指令一律不执行。本样例即使只是「看」，
+#: 也必须按这个频率持续发帧；只 poll 不喂帧，看几秒就把真机看哑了。
 FRAME_HZ = 200.0
 FRAME_DT = 1.0 / FRAME_HZ
+
+#: 上面那段说的通信超时保护时长 [s]：这台机器的 ``TIMEOUT`` 寄存器读出 8000。
+#: 只用来把话说具体（``--status`` 会读真值），逻辑上不依赖它。
+KEEPALIVE_TIMEOUT_S = 8.0
 
 #: 终端读数的最小刷新间隔 [s]。
 PRINT_DT = 0.5
@@ -66,6 +83,9 @@ def parse_args() -> argparse.Namespace:
     add_hardware_args(ap)
     ap.add_argument("--zero-gravity", action="store_true",
                     help="启动就让真机失力（可用手推动手指，仿真跟着走）")
+    ap.add_argument("--passive", action="store_true",
+                    help="一帧都不发，只读——已经有别的程序在驱动真机时用；"
+                         "单跑的话别加（没人喂帧，真机会锁通信超时故障）")
     ap.add_argument("--duration", type=float, default=0.0,
                     help="跑多少秒后自动退出（默认 0 = 一直跑到 Esc/Q 或关窗口）")
     return ap.parse_args()
@@ -109,11 +129,18 @@ def main() -> int:
           + (f" · {args.duration:g} s 后自动退出" if args.duration > 0 else ""))
 
     zero_gravity = False
-    if args.zero_gravity:
+    if args.passive:
+        print("   （--passive：一帧都不发，只读。真机得由别的程序喂帧，"
+              f"否则 {KEEPALIVE_TIMEOUT_S:g} s 后会锁通信超时故障）")
+        if args.zero_gravity:
+            print("   （--zero-gravity 在 --passive 下无效：失力也需要发帧）")
+    elif args.zero_gravity:
         zero_gravity = set_zero_gravity(gripper, True, zero_gravity)
     else:
-        print("   （真机保持使能。想用手推着看镜像，加 --zero-gravity "
-              "或运行中按 Z）")
+        print(f"   （真机保持使能，本样例每 {FRAME_DT * 1000:.0f} ms 发一条"
+              "「锁在实测位置」的保持帧——不命令运动，只是防止电机"
+              "因收不到帧而锁通信超时故障。想用手推着看镜像，"
+              "加 --zero-gravity 或运行中按 Z）")
 
     started = time.monotonic()
     last_frame = 0.0
@@ -126,7 +153,7 @@ def main() -> int:
             if pressed(events, QUIT_KEYS):
                 print("\n收到退出键")
                 break
-            if pressed(events, (ZERO_GRAVITY_KEY,)):
+            if pressed(events, (ZERO_GRAVITY_KEY,)) and not args.passive:
                 zero_gravity = set_zero_gravity(gripper, not zero_gravity,
                                                 zero_gravity)
 
@@ -135,13 +162,23 @@ def main() -> int:
                 print(f"\n跑满 {args.duration:g} s，退出")
                 break
 
-            # 失力模式要持续发 kp=0/kd=0 的帧维持；正常模式只需要 poll。
-            # 两种都只在这一个线程里收发，不会有第二个线程抢 CAN 帧。
-            if zero_gravity and now - last_frame >= FRAME_DT:
-                last_frame = now
-                gripper.send_mit_frame(q=0.0, kp=0.0, kd=0.0)
-                frames += 1
             state = gripper.get_state(wait=False)
+
+            # 两种模式都必须**持续发帧**，理由见 :data:`FRAME_HZ`：电机的 CAN
+            # 通信超时保护一到就锁通信丢失故障。只在这一个线程里收发，不会有
+            # 第二个线程抢 CAN 帧。
+            if not args.passive and now - last_frame >= FRAME_DT:
+                last_frame = now
+                if zero_gravity:
+                    # 失力：kp=0/kd=0，手指可以被手推动
+                    gripper.send_mit_frame(q=0.0, kp=0.0, kd=0.0)
+                else:
+                    # 正常模式：锁在**实测位置**（零前馈、目标就是它现在的位置）
+                    # ——不命令任何运动，只是让手指有刚度、把超时计数器喂上。
+                    gripper.send_mit_frame(q=state.position_rad,
+                                           kp=gripper.config.kp,
+                                           kd=gripper.config.kd)
+                frames += 1
 
             real_fraction = rad_to_fraction(gripper, state.position_rad)
             mirror(sim, real_fraction)
@@ -150,7 +187,8 @@ def main() -> int:
                 f"真机 {real_fraction * 100:5.1f}%   "
                 f"开口 {fraction_to_aperture_mm(real_fraction):5.2f} mm   "
                 f"力 {state.force_n:5.2f} N   "
-                + ("失力中（可手推）" if zero_gravity else "使能中")
+                + ("失力中（可手推）" if zero_gravity else
+                   ("只读（不发帧）" if args.passive else "锁位中"))
             )
 
             if now - last_print >= PRINT_DT:
@@ -174,7 +212,8 @@ def main() -> int:
         sim.disconnect()
         print("[真机] 已断开")
 
-    print(f"完成（{frames} 帧零重力指令）。"
+    what = "一帧都没发" if args.passive else f"{frames} 帧保活/零重力指令"
+    print(f"完成（{what}）。"
           f"反向的（仿真 → 真机）见 examples/02_sim_to_real.py")
     return 0
 

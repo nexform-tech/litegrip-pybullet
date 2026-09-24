@@ -65,10 +65,17 @@ class RecordingGripper:
     def __init__(self, ok: bool = True) -> None:
         self.frames: list[dict] = []
         self.ok = ok
+        self.position_rad = OPEN_RAD
+        self.config = _config().config
 
     def send_mit_frame(self, q, kp, kd, dq=0.0, tau=0.0) -> bool:
         self.frames.append(dict(q=q, kp=kp, kd=kd, dq=dq, tau=tau))
         return self.ok
+
+    def get_state(self, wait: bool = True):
+        return SimpleNamespace(position_rad=self.position_rad, force_n=0.0,
+                               position_mm=0.0, is_moving=False,
+                               error_code=1, is_error=False)
 
 
 def _config(**overrides):
@@ -78,6 +85,8 @@ def _config(**overrides):
         rad_to_mm=120.0 / (CLOSED_RAD - OPEN_RAD),
         pos_closed_rad=CLOSED_RAD,
         pos_open_rad=OPEN_RAD,
+        kp=KP,
+        kd=KD,
     )
     values.update(overrides)
     return SimpleNamespace(config=SimpleNamespace(**values))
@@ -217,6 +226,98 @@ class TestStreamRamp:
         assert move.frames == 0
         assert move.send(RecordingGripper(ok=True), 0.0) is True
         assert move.frames == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The idle keep-alive
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestIdleKeeper:
+    """A gripper that hears nothing for TIMEOUT ms latches a comms-loss fault.
+
+    Read off the motor itself: register ``TIMEOUT`` (RID 9) = 8000, so eight
+    seconds of silence is enough to wedge it — position still readable, every
+    command ignored, LED blinking. An interactive example that only transmits
+    while a move is in flight therefore breaks the hardware by being *looked
+    at* for eight seconds. These tests pin down that the idle path keeps
+    talking, and that what it says cannot move anything.
+    """
+
+    #: The motor's own CAN timeout, in seconds, as the hardware reports it.
+    WATCHDOG_S = 8.0
+
+    #: 64 Hz = 1/64 s per tick, a power of two, so every test timestamp below is
+    #: exact in binary and the cadence assertions cannot drift.
+    HZ = 64.0
+    TICK = 1.0 / HZ
+
+    def _keeper(self, gripper=None):
+        return ex02.IdleKeeper(gripper or RecordingGripper(), hz=self.HZ)
+
+    def test_it_sends_at_its_own_cadence(self):
+        keeper = self._keeper()
+        for i in range(int(self.HZ) + 1):          # 1.0 s
+            keeper.maybe_send(i * self.TICK)
+        assert keeper.frames == int(self.HZ) + 1
+
+    def test_the_first_frame_goes_out_immediately(self):
+        """Waiting one interval before the first frame is a needless silence."""
+        keeper = self._keeper()
+        assert keeper.maybe_send(0.0) is True
+        assert keeper.maybe_send(0.0) is None      # ...then not again
+
+    def test_it_never_leaves_a_gap_long_enough_to_trip_the_watchdog(self):
+        """The regression test for the fault this whole file is about.
+
+        Whatever the main loop's cadence does — and a PyBullet loop is much
+        slower than 200 Hz — the gap between consecutive frames has to stay far
+        below the motor's own timeout. The loop below ticks at half the idle
+        rate, which is the worst case the keeper can be asked to cover.
+        """
+        keeper = self._keeper()
+        step = self.TICK / 2
+        for i in range(int(20 / step)):            # 20 s of idling
+            keeper.maybe_send(i * step)
+        assert keeper.frames == int(20 / self.TICK), "one frame per interval"
+        assert keeper.interval * 2 < self.WATCHDOG_S
+        assert step < self.WATCHDOG_S
+
+    def test_the_idle_frame_cannot_move_anything(self):
+        """Hold at the measured position: zero torque, zero velocity.
+
+        ``kp × (q_target − q_measured)`` is zero by construction, so the frame
+        is a no-op that only feeds the timeout counter.
+        """
+        gripper = RecordingGripper()
+        gripper.position_rad = CLOSED_RAD
+        keeper = ex02.IdleKeeper(gripper, hz=50.0)
+
+        keeper.maybe_send(0.0)
+        frame = gripper.frames[0]
+        assert frame["q"] == pytest.approx(CLOSED_RAD)
+        assert frame["dq"] == 0.0
+        assert frame["tau"] == 0.0
+
+    def test_it_repeats_the_last_command_so_the_grip_survives(self):
+        """Idling must not silently drop a grip force the user asked for."""
+        gripper = RecordingGripper()
+        keeper = ex02.IdleKeeper(gripper, hz=50.0)
+        move = ex02.StreamMove(
+            start_rad=OPEN_RAD, target_rad=CLOSED_RAD, duration_s=1.0,
+            hold_s=0.5, kp=KP, kd=KD, tau_nm=1.7)
+        move.started = 0.0
+        keeper.remember(move)
+        keeper.maybe_send(0.0)
+        assert gripper.frames[0]["q"] == pytest.approx(CLOSED_RAD)
+        assert gripper.frames[0]["tau"] == pytest.approx(1.7)
+
+    def test_dropped_keepalives_are_counted(self):
+        keeper = self._keeper(RecordingGripper(ok=False))
+        for i in range(5):
+            keeper.maybe_send(i * 1 / 50.0)
+        assert keeper.frames == 0
+        assert keeper.dropped == 5
 
 
 # ═══════════════════════════════════════════════════════════════════════════
