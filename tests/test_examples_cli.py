@@ -219,12 +219,23 @@ class TestExample03WithoutHardware:
         # ...and it warns that running it alone leaves nobody feeding the motor
         assert "通信超时" in stdout
 
-    def test_passive_still_reports_a_missing_interface(self):
-        """Suppressing the sends must not suppress connecting or the error."""
-        result = run(EXAMPLE_03, "--passive", "--channel", NOWHERE,
-                     "--duration", "1")
-        assert result.returncode == 1
-        assert NOWHERE in output_of(result)
+    def test_passive_does_not_change_how_far_it_gets(self):
+        """Suppressing the sends must not short-circuit connecting or the error.
+
+        Compared against the same run *without* ``--passive`` rather than against
+        a fixed string, because how far 03 gets depends on whether the SDK is
+        installed: with it the run reaches the CAN interface, without it it
+        stops earlier. Both are correct; ``--passive`` must not alter either.
+        """
+        plain = run(EXAMPLE_03, "--channel", NOWHERE, "--duration", "1")
+        passive = run(EXAMPLE_03, "--passive", "--channel", NOWHERE,
+                      "--duration", "1")
+        assert plain.returncode == 1
+        assert passive.returncode == plain.returncode
+        if "找不到真机 SDK" in output_of(plain):
+            assert "找不到真机 SDK" in output_of(passive)
+        else:
+            assert NOWHERE in output_of(passive)
 
     def test_without_the_sdk_it_says_how_to_get_it(self):
         """The SDK-absent path is worth covering too — CI is exactly that case."""
