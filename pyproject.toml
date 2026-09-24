@@ -4,9 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "litegrip-pybullet"
-# Placeholder: releases are cut by semantic-release in CI, which overwrites this
-# field in the publish workspace. Never edit it — the git tag is the version.
-version = "0.0.0-semantic-release"
+# Placeholder, not a version: releases are cut by semantic-release in CI and the
+# git tag is the only source of truth, so never edit this to a real number.
+#
+# The repository standard spells the placeholder `0.0.0-semantic-release`, which
+# is valid semver but *not* valid PEP 440 — pip and setuptools reject the whole
+# pyproject.toml, so `pip install -e .` fails before it does anything. Moving the
+# marker into a local version segment keeps the same meaning (`0.0.0`, tagged
+# "semantic-release") in valid PEP 440. It normalises to `0.0.0+semantic.release`.
+version = "0.0.0+semantic-release"
 description = "PyBullet simulation environment for the LiteGrip two-finger gripper"
 readme = "README.md"
 requires-python = ">=3.8"
