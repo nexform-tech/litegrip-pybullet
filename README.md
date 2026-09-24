@@ -96,7 +96,8 @@ causes on this hardware:
   frame, so a single frame demands under 1 Nm.
 - **Idling too long**: the `TIMEOUT` register (RID 9, measured 8000 ms here) is a
   CAN watchdog — that long with no frame received latches a communication-loss
-  fault (**0xD**, a code the SDK's `describe_error` does not yet know). **A quiet
+  fault (**0xD**, a code the SDK's `describe_error` does not yet know — the
+  example names it itself instead of reporting 未知错误). **A quiet
   idle period is itself the fault cause**, and it was the dominant one behind
   "simulation can read the gripper but not control it." Both examples now send
   hold frames (target = measured position, zero feed-forward) while idle; 03's

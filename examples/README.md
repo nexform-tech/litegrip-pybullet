@@ -145,7 +145,7 @@ The fault is latched: it will not clear itself until the gripper is power-cycled
 | Code | Meaning | What triggers it |
 | --- | --- | --- |
 | 0x9 / 0xA | under-voltage / over-current | a step command: ~185 Nm in one frame on a ~10 Nm motor |
-| **0xD** | **communication loss** (the SDK's `describe_error` does not know it yet) | 8 s with no frame received — including "just watching with the window open" |
+| **0xD** | **communication loss** — the SDK's `describe_error` does not know this code, so the example names it itself (`EXTRA_ERRORS`) | 8 s with no frame received — including "just watching with the window open" |
 
 0xD is the `TIMEOUT` register's CAN watchdog: **idling is itself the fault
 cause.** This example therefore keeps sending hold frames at 200 Hz through its

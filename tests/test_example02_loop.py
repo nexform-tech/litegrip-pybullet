@@ -297,6 +297,38 @@ class TestFaultHandling:
         assert run.sim.disconnected
 
 
+class TestDescribingAFault:
+    """The fault path must not be able to fail.
+
+    A wedged motor is diagnosed by what this prints, so a crash in here costs the
+    operator the one piece of information that explains the fault. CI has no SDK
+    and ``--dry-run`` is documented to work without one, so the SDK import has to
+    be optional — and the code it *doesn't* know has to be spelled out anyway.
+    """
+
+    def test_the_communication_watchdog_code_is_named(self):
+        """0xD is what this hardware latches, and the SDK calls it 未知错误."""
+        text = ex02.describe_code(0xD)
+        assert "0xD" not in text and "未知错误" not in text, \
+            f"0xD 又被打回「未知错误」了：{text}"
+        assert "TIMEOUT" in text or "超时" in text
+
+    def test_the_sdk_still_gets_the_codes_it_knows(self):
+        """Duplicating the table must not shadow the SDK's own wording."""
+        assert "过流" in ex02.describe_code(0xA)
+
+    def test_it_works_without_the_sdk_installed(self, monkeypatch):
+        """Exactly CI's situation: ``from litegrip... import`` raises."""
+        monkeypatch.setitem(sys.modules, "litegrip", None)
+        monkeypatch.setitem(sys.modules, "litegrip.constants", None)
+        for code in (0x0, 0x1, 0x9, 0xA, 0xB, 0xC, 0xD):
+            text = ex02.describe_code(code)
+            assert "未知错误" not in text, \
+                f"没装 SDK 就翻译不出 0x{code:X} 了：{text!r}"
+        # A code nobody knows still has to come back as text, not as a raise.
+        assert "0x7F" in ex02.describe_code(0x7F)
+
+
 class TestItNeverLeavesTheMotorUnfed:
     """``enable()`` sends one priming frame and then stops; everything the
     example does between that and its first loop frame is dead time, and 8 s of

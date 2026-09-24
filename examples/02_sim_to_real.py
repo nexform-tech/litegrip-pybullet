@@ -216,13 +216,39 @@ def plan_duration(gripper, distance_rad: float, requested: float | None) -> floa
     return max(requested, min_s)
 
 
+#: SDK 的 ``ERROR_DESCRIPTIONS`` 认得 0x0/0x1/0x9/0xA/0xB/0xC，唯独不认 0xD——
+#: 而本机最容易锁上的恰恰是它：``TIMEOUT`` 寄存器（8000 ms）到期、这期间一帧都
+#: 没收到，电机就报这个码（见 README 的故障表）。SDK 只会说「未知错误」，操作员
+#: 看不出「这是喂帧断了」和「电机坏了」的区别。其余码仍以 SDK 为准，免得两处
+#: 描述慢慢走偏。
+EXTRA_ERRORS = {
+    0xD: "通信超时故障（TIMEOUT 期内一帧都没收到）",
+}
+
+#: 没装 SDK 时的兜底表，内容抄自 ``litegrip.constants.ERROR_DESCRIPTIONS``。
+FALLBACK_ERRORS = {
+    0x0: "已失能",
+    0x1: "已使能",
+    0x9: "欠压故障 (UV)",
+    0xA: "过流故障 (OC)",
+    0xB: "MOS 过温故障",
+    0xC: "线圈过温故障",
+}
+
+
 def describe_code(error_code: int) -> str:
-    """错误码 → 可读文本。
+    """错误码 → 可读文本。**没装 SDK 也必须能说人话。**
 
-    ``describe_error`` 懒导入：``--dry-run`` 没装 SDK 也要能跑。
+    故障路径是最不该抛异常的地方：负责报故障的代码自己崩了，操作员就只剩一个
+    回溯，看不到电机报的到底是哪一条。所以 ``describe_error`` 是懒导入且**带
+    兜底**的——``--dry-run`` 和 CI 没装 SDK 也照样能翻译错误码。
     """
-    from litegrip.constants import describe_error
-
+    if error_code in EXTRA_ERRORS:
+        return EXTRA_ERRORS[error_code]
+    try:
+        from litegrip.constants import describe_error
+    except ImportError:
+        return FALLBACK_ERRORS.get(error_code, f"未知错误 (0x{error_code:X})")
     return describe_error(error_code)
 
 
