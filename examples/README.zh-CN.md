@@ -137,7 +137,7 @@ python3 examples/02_sim_to_real.py --status --clear-fault    # 清掉锁死的�
 
 `--status` 会把这个寄存器的真值打出来，别猜：
 
-```
+```text
    ⏱  通信超时保护 = 8000 ms：连续这么久收不到帧，电机会锁进通信丢失故障
       （位置照读、指令不执行、红灯闪）
 ```

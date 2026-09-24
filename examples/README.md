@@ -158,7 +158,7 @@ control it."
 
 `--status` prints the register rather than leaving you to guess:
 
-```
+```text
    ⏱  通信超时保护 = 8000 ms：连续这么久收不到帧，电机会锁进通信丢失故障
       （位置照读、指令不执行、红灯闪）
 ```
