@@ -466,34 +466,47 @@ def main() -> int:
         gripper = open_real_gripper(args)
         n_to_nm = import_litegrip().UnitConversion.N_TO_NM
 
-    # 一定是开窗的：上面已经拦掉了 --headless，滑条只有 GUI 连接才有
-    # （DIRECT 连接里 addUserDebugParameter 会返回 -1）。
-    sim = GripperSim(urdf_path=args.urdf, gui=True, max_force_n=force_n)
-    sim.focus_camera()
-    target_id, force_id = make_sliders(gripper, force_n)
-    if target_id < 0 or force_id < 0:
-        sim.disconnect()
-        raise SystemExit(
-            "❌ 建不出滑条（PyBullet 的 addUserDebugParameter 只在 GUI 连接下可用）。\n"
-            "   检查是否真的有可用显示，或改用 examples/01_sim_only.py。"
-        )
-
-    print(f"   仿真：{sim.urdf_path}")
-    speed_note = (f"{args.duration:g} s" if args.duration
-                  else f"自动（≤{RATED_SPEED_MM_S:g} mm/s）")
-    print(f"   拖滑条改目标 → 按 Enter/空格 下发（斜坡 {speed_note} + "
-          f"保持 {DEFAULT_HOLD_S:g} s，{FRAME_HZ:g} Hz 发帧）→ Esc/Q 退出")
-    if gripper is None:
-        print("   （dry-run：按 Enter 只打印，不会真的下发）")
-
+    # ⚠️ 从这里起全部在 try 里：真机一旦使能（上面 open_real_gripper 干的事），
+    # 任何异常都必须走到 finally 去 stop/disconnect。否则程序带着一个「已使能、
+    # 但再没人喂帧」的电机退出——8 s 后就锁通信超时故障（红灯闪），而且因为进程
+    # 已经死了，连是哪一步炸的都看不到。窗口建得慢、滑条建不出来，都算在这里面。
+    sim = None
+    keeper: IdleKeeper | None = None
     move: StreamMove | None = None
     last_sent = 0.0
     last_print = 0.0
     sent_count = 0
     faulted = False    # 真机报故障：停发、不再对着不听话的电机发帧
-    keeper = None if gripper is None else IdleKeeper(gripper)
 
     try:
+        # 一定是开窗的：上面已经拦掉了 --headless，滑条只有 GUI 连接才有
+        # （DIRECT 连接里 addUserDebugParameter 会返回 -1）。
+        sim = GripperSim(urdf_path=args.urdf, gui=True, max_force_n=force_n)
+        sim.focus_camera()
+        target_id, force_id = make_sliders(gripper, force_n)
+        if target_id < 0 or force_id < 0:
+            raise SystemExit(
+                "❌ 建不出滑条（PyBullet 的 addUserDebugParameter 只在 GUI 连接下"
+                "可用）。\n   检查是否真的有可用显示，或改用 "
+                "examples/01_sim_only.py。"
+            )
+
+        print(f"   仿真：{sim.urdf_path}")
+        speed_note = (f"{args.duration:g} s" if args.duration
+                      else f"自动（≤{RATED_SPEED_MM_S:g} mm/s）")
+        print(f"   拖滑条改目标 → 按 Enter/空格 下发（斜坡 {speed_note} + "
+              f"保持 {DEFAULT_HOLD_S:g} s，{FRAME_HZ:g} Hz 发帧）→ Esc/Q 退出")
+        if gripper is None:
+            print("   （dry-run：按 Enter 只打印，不会真的下发）")
+        else:
+            # 使能之后**立刻**喂一帧锁在当前位置，不等主循环第一圈：`enable()`
+            # 打完那条零力矩底帧就不再发了（SDK 的 initialize 不负责保活），
+            # 而建窗口、建滑条这些事要几百毫秒。先喂上，通信超时计数器归零。
+            keeper = IdleKeeper(gripper)
+            keeper.maybe_send(time.monotonic())
+            print(f"   [真机] 已锁在当前位置（保活 {IDLE_HZ:g} Hz 已开始，"
+                  f"目标 = 实测位置、零前馈，不命令运动）")
+
         while sim.connected():
             events = sim.keyboard_events()
             if pressed(events, QUIT_KEYS):
@@ -620,7 +633,8 @@ def main() -> int:
             gripper.stop()
             gripper.disconnect()
             print("[真机] 已停止发帧并断开")
-        sim.disconnect()
+        if sim is not None:
+            sim.disconnect()
 
     if faulted:
         return 1
