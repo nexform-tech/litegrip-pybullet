@@ -25,7 +25,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-dependencies = ["pybullet>=3.2"]
+dependencies = [
+    "pybullet>=3.2",
+    # pybullet's wheel declares no requirements of its own, but importing it
+    # fails without numpy ("ImportError: numpy._core.multiarray failed to
+    # import"), so it has to be required here or a clean install is unusable.
+    "numpy>=1.20",
+]
 
 [project.optional-dependencies]
 hardware = ["litegrip>=2.2"]
