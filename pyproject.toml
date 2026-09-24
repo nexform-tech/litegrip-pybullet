@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "litegrip-pybullet"
+# Placeholder: releases are cut by semantic-release in CI, which overwrites this
+# field in the publish workspace. Never edit it — the git tag is the version.
+version = "0.0.0-semantic-release"
+description = "PyBullet simulation environment for the LiteGrip two-finger gripper"
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["gripper", "robotics", "simulation", "pybullet", "litegrip"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = ["pybullet>=3.2"]
+
+[project.optional-dependencies]
+hardware = ["litegrip>=2.2"]
+test = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/nexform-tech/litegrip-pybullet"
+Repository = "https://github.com/nexform-tech/litegrip-pybullet"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["litegrip_pybullet*"]
+
+[tool.setuptools.package-data]
+litegrip_pybullet = [
+    "py.typed",
+    "assets/litegrip_urdf/urdf/*.urdf.xacro",
+    "assets/litegrip_urdf/meshes/*.STL",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+# src/ 布局：让测试直接跑未安装的检出（CI 里也会 pip install，双保险）
+pythonpath = ["src"]
