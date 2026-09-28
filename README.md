@@ -20,11 +20,14 @@ being driven in both directions.
 ```bash
 python3 -m pip install pybullet      # simulation
 python3 -m pip install -e .          # this package
-python3 -m pip install litegrip      # optional: to drive real hardware
 ```
 
 The gripper model (URDF + STL meshes) is bundled, so nothing else is needed to
-load it.
+load it. To drive real hardware, examples 02 and 03 additionally need the
+`litegrip` SDK, which is **not on PyPI** — take it from a checkout, either
+`python3 -m pip install -e /path/to/lite-grip`, a `lite-grip` directory beside
+this repository, or `$LITEGRIP_SDK_DIR`. Without one of those they stop at
+startup and name the SDK members they require.
 
 ## Quick start
 
@@ -81,7 +84,7 @@ What has been verified, and what has not:
 | Force cap and friction grasping | ✅ Verified | Holds 5 N against a 10 N grip, slips at 15 N; only the fingers touch the part |
 | Example 01 | ✅ Verified | Runs headless, exits 0, all four demos asserted in `tests/test_examples_cli.py` |
 | Example 02 (simulation → hardware) | ⚠️ **Partially verified** | Run against a real gripper on `can0`, where it latched a motor fault; the ramp fix below is covered by `tests/test_example02_stream.py` but has **not** itself been run against hardware |
-| Example 02 `--status` diagnostics | ⚠️ **Partially verified** | `--status` on a real gripper reaches `connect()` and reports a missing CAN interface correctly; reading and clearing a latched fault has not been exercised on hardware |
+| Example 02 `--status` diagnostics | ⚠️ **Partially verified** | On a real gripper on 2026-09-28 it read a live status frame, the position, the error code and the DM registers without enabling or moving the motor (exit 0); the reporting path for a **latched fault**, and clearing one, have not been exercised on hardware |
 | Example 03 (hardware → simulation) | ⚠️ **Partially verified** | The read-only mirror path was run against a real gripper on `can0`; `--zero-gravity` and `--passive` were not |
 | Real-hardware motion commands | ⚠️ **Partially verified** | A step-command stream was sent to hardware from an earlier revision of example 02 and faulted the motor; the ramped replacement has not been run yet |
 | Idle keep-alive (`IdleKeeper`, 03's hold frames) | ⚠️ **Partially verified** | Unit-tested for cadence and for the gap staying under the timeout; **never run against hardware** |
@@ -90,21 +93,23 @@ What has been verified, and what has not:
 causes on this hardware:
 
 - **A step command** (the whole target in one frame): the MIT position term
-  `kp × (q_target − q_actual)` at `kp = 100 Nm/rad` over a 1.845 rad travel asks
-  for ~185 Nm from a ~10 Nm motor, which latches an under-voltage/over-current
-  fault (0x9/0xA). Example 02 ramps like the SDK's own `goto_rad`, one tick per
-  frame, so a single frame demands under 1 Nm.
-- **Idling too long**: the `TIMEOUT` register (RID 9) is a CAN watchdog — that
-  long with no frame received latches a communication-loss fault (**0xD**, a
-  code the SDK's `describe_error` does not yet know — the example names it
-  itself instead of reporting 未知错误). **A quiet idle period is itself the
-  fault cause**, and it was the dominant one behind "simulation can read the
-  gripper but not control it." Do not trust a remembered duration — read it:
-  this machine reported 8000 ms on 2026-09-24 and 0 ms (watchdog off) on
-  2026-09-28, and `--status` prints the live value. Both examples keep sending
-  hold frames (target = measured position, zero feed-forward) while idle
-  regardless; 03's `--passive` opts out of that when another program is driving
-  the bus.
+  `kp × (q_target − q_actual)` over a 1.845 rad travel asks for ~185 Nm from a
+  ~10 Nm motor at the SDK's default `kp = 100 Nm/rad`, which latches an
+  under-voltage/over-current fault (0x9/0xA). `kp` is a calibration entry, not a
+  constant — at this machine's present 5.0 the same step asks for ~9 Nm — so
+  example 02 ramps the *position target* like the SDK's own `goto_rad`, one tick
+  per frame, which bounds the demand whatever `kp` is.
+- **Idling too long**: an enabled motor latches a communication-loss fault
+  (**0xD**, which the SDK's `describe_error` now names `通讯丢失 (CAN 超时)`)
+  after roughly **0.9 s** of silence — the SDK's own measurement on this
+  hardware. **A quiet idle period is itself the fault cause**, and it was the
+  dominant one behind "simulation can read the gripper but not control it." The
+  `TIMEOUT` register (RID 9) does not give that duration — it read 8000 ms on
+  2026-09-24 and 0 ms (watchdog off) on 2026-09-28, and the SDK marks it
+  unresolved; `--status` prints the live value without drawing a conclusion from
+  it. Both examples keep sending hold frames (target = measured position, zero
+  feed-forward) while idle regardless; 03's `--passive` opts out of that when
+  another program is driving the bus.
 
 Both faults are diagnosed and cleared without moving the motor via
 `examples/02_sim_to_real.py --status [--clear-fault]`.

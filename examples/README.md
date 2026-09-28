@@ -16,15 +16,21 @@ simulation.
 
 ```bash
 python3 -m pip install pybullet          # examples 01–03
-python3 -m pip install litegrip          # examples 02–03 (hardware)
+python3 -m pip install -e /path/to/lite-grip   # examples 02–03 (hardware)
 ```
 
-The `litegrip` SDK is also picked up from a sibling `lite-grip` checkout or from
-`$LITEGRIP_SDK_DIR`, so a source checkout works without installing:
+The `litegrip` SDK is **not on PyPI**: `pip install litegrip` installs something
+else, and no released version carries the API these examples use. Take it from a
+checkout — either an editable install as above, or a sibling `lite-grip`
+directory next to this repository, or:
 
 ```bash
 export LITEGRIP_SDK_DIR=/path/to/lite-grip
 ```
+
+Missing either of the last two, 02 and 03 stop at startup and name the SDK
+members they need (`LiteGrip.refresh_status`, `GripperState.data_age_s` /
+`has_data` / `is_stale`) instead of failing somewhere inside the control loop.
 
 If `pybullet` is missing, the examples re-exec themselves into `./.venv/bin/python`
 when that exists. Nothing else is required: the URDF and its meshes are bundled
@@ -100,8 +106,9 @@ You set the target in the PyBullet window; pressing Enter sends it.
    opening is displayed next to it; the gap between the two is the tracking
    error, and it stays open while the fingers are blocked by a part — which is
    how you tell you have gripped something.
-4. Press **Esc** or **Q** to quit. Frame sending stops and the motor holds its
-   position.
+4. Press **Esc** or **Q** to quit. Frame sending stops and the motor is
+   **disabled** (0xFD): the fingers go limp and a gripped part will drop, but no
+   communication-loss fault is left latched on the motor.
 
 ```bash
 python3 examples/02_sim_to_real.py --dry-run         # window only, never touches CAN
@@ -115,14 +122,19 @@ connection has no sliders. Use 01 for a headless run.
 
 #### Why it ramps
 
-The MIT position term is `kp × (q_target − q_actual)` with `kp = 100 Nm/rad`.
-Sending the target as a step means the first frame asks for
-`100 × 1.845 rad ≈ 185 Nm` on a motor rated around 10 Nm. The current saturates,
-the motor latches an under-voltage/over-current fault, and it then keeps
-reporting its position while ignoring every command — the blinking red LED and
-"it reads but I can't control it" symptom. This example ramps like the SDK's
-`goto_rad` does: each frame advances one tick from where the motor *is*, so a
-single frame demands under 1 Nm.
+The MIT position term is `kp × (q_target − q_actual)`, and `kp` is an entry in
+the calibration file rather than a constant. At the SDK's default `kp = 100
+Nm/rad`, sending the target as a step asks for `100 × 1.845 rad ≈ 185 Nm` from a
+motor rated around 10 Nm; at this machine's present `kp = 5.0` the same step asks
+for about 9 Nm, inside the rating. The current saturates and the motor latches an
+under-voltage/over-current fault, after which it keeps reporting its position
+while ignoring every command — the blinking red LED and "it reads but I can't
+control it" symptom.
+
+The ramp is kept because it does not depend on that number: it bounds how far the
+*position target* may jump in one frame, whatever `kp` is configured to. Each
+frame advances one tick from where the motor *is*, so a single frame demands well
+under the rated torque. The SDK's own `goto_rad` ramps for the same reason.
 
 #### If a wedged gripper reads but won't move
 
@@ -144,31 +156,36 @@ The fault is latched: it will not clear itself until the gripper is power-cycled
 
 | Code | Meaning | What triggers it |
 | --- | --- | --- |
-| 0x9 / 0xA | under-voltage / over-current | a step command: ~185 Nm in one frame on a ~10 Nm motor |
-| **0xD** | **communication loss** — the SDK's `describe_error` does not know this code, so the example names it itself (`EXTRA_ERRORS`) | no frame for as long as `TIMEOUT` (RID 9) says — including "just watching with the window open" |
+| 0x9 / 0xA | under-voltage / over-current | a step command: ~185 Nm in one frame on a ~10 Nm motor at the default kp, ~9 Nm at this machine's 5.0 |
+| **0xD** | **communication loss** (`通讯丢失 (CAN 超时)`, named by the SDK's own `describe_error`) | an enabled motor left silent for about 0.9 s — including "just watching with the window open" |
 
-0xD is the `TIMEOUT` register's CAN watchdog: **idling is itself the fault
-cause.** This example therefore keeps sending hold frames at 200 Hz through its
-idle periods (target = measured position, zero feed-forward, no motion
-commanded) — see `IdleKeeper`. Earlier revisions sent nothing, so the quiet
-stretch after `enable()`'s priming frame — PyBullet starting up plus a few
-seconds of looking at the window — went past the watchdog and wedged the motor.
-That, not the ramp, was the main cause of "simulation can read the gripper but
-not control it."
+0xD is the motor's CAN watchdog, and it is measured rather than configured:
+**an enabled motor latches it after roughly 0.9 s of silence** (the SDK's own
+figure, taken on this hardware). **Idling is itself the fault cause.** This
+example therefore keeps sending hold frames at 200 Hz through its idle periods
+(target = measured position, zero feed-forward, no motion commanded) — see
+`IdleKeeper`. Earlier revisions sent nothing, so the quiet stretch after
+`enable()` — its 50 ms hold stream ends, then PyBullet starts up and the operator
+looks at the window for a few seconds — went past the watchdog and wedged the
+motor. That, not the ramp, was the main cause of "simulation can read the gripper
+but not control it."
 
-`--status` prints the register rather than leaving you to guess:
+Do not derive that duration from the `TIMEOUT` register (RID 9): it reads 8000 ms
+on one run and 0 (no watchdog) on another, and neither agrees with the measured
+0.9 s, so the SDK marks it as unresolved. `--status` prints the register's live
+value for the record and says as much next to it:
 
 ```text
-   ⏱  通信超时保护 = 8000 ms：连续这么久收不到帧，电机会锁进通信丢失故障（位置照读、指令不执行、红灯闪）。
-      样例 02/03 空闲时也在持续发帧，就是为了不让它到期；
-      只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
+   寄存器 TIMEOUT=0 · CTRL_MODE=1 · UV_Value=15 · OC_Value=0.8 · OT_Value=100
+   ⏱  通信超时保护（TIMEOUT, RID 9）= 0（这个寄存器当前不生效）
+   ⚠️  别拿这个寄存器当依据：实测**使能态**的电机静默约 0.9 s 就锁 0xD 通信丢失故障，与寄存器读数对不上（这台机器读到过 8000，也读到过 0），SDK 自己把这条标成「待查」。
+      所以 02/03 空闲时照 200 Hz 持续发帧，不赌这个数字；只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
 ```
 
-Read it instead of remembering it: the same machine reported **8000 ms** on
-2026-09-24 and **0 ms** on 2026-09-28, where `= 0` means the watchdog is off on
-that motor and silence no longer latches 0xD. The examples keep feeding either
-way — a different motor, or someone editing that register, changes the
-conclusion.
+(Captured on this bench on 2026-09-28, motor disabled and healthy: exit 0.)
+
+The examples keep feeding either way — a different motor, or someone editing that
+register, changes nothing about the timings these examples rely on.
 
 A **second master** on the same bus makes the symptom messier still: the two
 streams fight and neither side wins. Before running a hardware example, check
@@ -214,12 +231,13 @@ python3 examples/03_real_to_sim.py --duration 10    # stop after 10 s
 
 #### Why "just watching" still has to send frames
 
-The motor's `TIMEOUT` register (RID 9) is a CAN watchdog: **that long with no
-frame received latches a communication-loss fault** — again a blinking red LED,
-positions that still read, and commands that are silently ignored. The value is
-read off the motor and it moves: **8000 ms** on 2026-09-24, **0 ms** (watchdog
-off) on 2026-09-28. When it is nonzero, a few seconds of watching the PyBullet
-window is enough to wedge the gripper.
+An **enabled** motor that hears nothing for about **0.9 s** latches the
+communication-loss fault (0xD) — again a blinking red LED, positions that still
+read, and commands that are silently ignored. The SDK measured that 0.9 s on this
+hardware; the `TIMEOUT` register (RID 9) disagrees with it (8000 ms on one read,
+0 on another) and is marked unresolved, so the timing here follows the
+measurement. Watching the PyBullet window without feeding it is enough to wedge
+the gripper.
 
 So the default mode is not read-only: it sends "**locked at the measured
 position**" hold frames at 200 Hz — target where the fingers already are, zero
@@ -230,15 +248,17 @@ stiffness and keeps the watchdog fed. To back-drive it instead, add
 Use `--passive` when a **different program** is driving the hardware: this example
 then sends no frames and disables the Z key, so the two never fight over the bus.
 The cost is that the other program has to feed the motor itself, or it latches
-once the watchdog expires anyway. **Do not combine `--passive` with running this
+0xD about 0.9 s later anyway. **Do not combine `--passive` with running this
 example alone.**
 
 `--zero-gravity` (or Z) makes the gripper *soft*, so the fingers can be
 back-driven and can also sag under gravity. Support the gripper before enabling
 it.
 
-Quitting restores the motor (`exit_zero_gravity()`) so the gripper holds its
-position rather than going limp.
+Quitting **disables** the motor (0xFD) rather than sending one last relock frame:
+a single frame has nothing after it, so an enabled motor goes quiet and latches
+0xD within the second — with nobody left to clear it. The gripper therefore goes
+limp on exit and the fingers may drift under their own weight.
 
 ## Before you drive the hardware
 
