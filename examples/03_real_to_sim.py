@@ -40,10 +40,13 @@ import sys
 import time
 
 from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
+    FRESH_WAIT_S,
     add_common_args,
     add_hardware_args,
+    fresh_state,
     open_real_gripper,
     rad_to_fraction,
+    request_status_frame,
     status_line,
 )
 
@@ -146,6 +149,8 @@ def main() -> int:
     last_frame = 0.0
     last_print = 0.0
     frames = 0
+    hold_rad: float | None = None   # 锁位帧的目标：读到实测位置的那一刻定一次
+    starved = 0                     # 读不到状态帧、于是没发成锁位帧的次数
 
     try:
         while sim.connected():
@@ -154,15 +159,40 @@ def main() -> int:
                 print("\n收到退出键")
                 break
             if pressed(events, (ZERO_GRAVITY_KEY,)) and not args.passive:
+                was_zero_gravity = zero_gravity
                 zero_gravity = set_zero_gravity(gripper, not zero_gravity,
                                                 zero_gravity)
+                if was_zero_gravity and not zero_gravity:
+                    # 刚从失力恢复：手指可能已经被推到别处了，锁位目标必须重新取
+                    # **现在**的位置。还用失力之前那个目标的话，本样例就是在命令
+                    # 电机走回原处——一次没人要求的运动（SDK 的 exit_zero_gravity
+                    # 自己也是锁在当前位置）。
+                    state_now = fresh_state(gripper)
+                    hold_rad = state_now.position_rad if state_now else None
 
             now = time.monotonic()
             if args.duration > 0 and now - started >= args.duration:
                 print(f"\n跑满 {args.duration:g} s，退出")
                 break
 
-            state = gripper.get_state(wait=False)
+            # 读真机位置：**必须**是新鲜读数，所以走 fresh_state（等到一帧新的
+            # 状态帧）而不是 get_state(wait=False) 的缓存。本样例展示的就是
+            # 「真机现在在哪」，而缓存里可能是冻结的旧值——读不到时更是
+            # MotorState 的初值 0.0，照它渲染画面等于撒谎。读不到就把画面停在
+            # 最后一次读数上，并在窗口和终端里都说明。
+            state = fresh_state(gripper)
+            stale = state is None
+            if stale:
+                state = gripper.get_state(wait=False)     # 只为把画面停住
+
+            if not stale and hold_rad is None:
+                # 锁位帧的目标只定这一次，之后一直重发同一个值。每拍都拿当次
+                # 读数现造目标的话，一次读数冻结就会变成一条指向伪值的新指令
+                # ——那是阶跃，见 examples/02 里 hold_frame 的说明。
+                hold_rad = state.position_rad
+                if not args.passive:
+                    print(f"   [真机] 锁在实测位置 {hold_rad:+.4f} rad"
+                          "（零前馈，不命令运动）")
 
             # 两种模式都必须**持续发帧**，理由见 :data:`FRAME_HZ`：电机的 CAN
             # 通信超时保护一到就锁通信丢失故障。只在这一个线程里收发，不会有
@@ -170,15 +200,28 @@ def main() -> int:
             if not args.passive and now - last_frame >= FRAME_DT:
                 last_frame = now
                 if zero_gravity:
-                    # 失力：kp=0/kd=0，手指可以被手推动
+                    # 失力：kp=0/kd=0，手指可以被手推动（kp=0 时 q 给什么都不出力）
                     gripper.send_mit_frame(q=0.0, kp=0.0, kd=0.0)
-                else:
+                    frames += 1
+                elif hold_rad is not None:
                     # 正常模式：锁在**实测位置**（零前馈、目标就是它现在的位置）
                     # ——不命令任何运动，只是让手指有刚度、把超时计数器喂上。
-                    gripper.send_mit_frame(q=state.position_rad,
-                                           kp=gripper.config.kp,
+                    gripper.send_mit_frame(q=hold_rad, kp=gripper.config.kp,
                                            kd=gripper.config.kd)
-                frames += 1
+                    frames += 1
+                else:
+                    # 还没读到过位置：不造锁位帧——目标只能是实测位置，拿缓存的
+                    # 伪值当目标是发一条阶跃指令出去，比少发一帧危险得多。但也
+                    # 不能干等：电机不会自己发状态帧，等下去就一直是等。所以发
+                    # 一帧**只读**的 0xCC 刷新请求（SDK 原话 "Does not change
+                    # motor output"）把它叫醒，下一拍就有位置可锁了。
+                    request_status_frame(gripper)
+                    starved += 1
+                    if starved % 200 == 1:
+                        print(f"   [真机] 读不到状态帧（第 {starved} 次）：已发一帧"
+                              "只读的 0xCC 状态请求（不改电机输出）。\n"
+                              "      读到实测位置才开始发锁位帧——"
+                              "目标必须是实测位置，不能拿缓存的伪值造。")
 
             real_fraction = rad_to_fraction(gripper, state.position_rad)
             mirror(sim, real_fraction)
@@ -187,18 +230,23 @@ def main() -> int:
                 f"真机 {real_fraction * 100:5.1f}%   "
                 f"开口 {fraction_to_aperture_mm(real_fraction):5.2f} mm   "
                 f"力 {state.force_n:5.2f} N   "
-                + ("失力中（可手推）" if zero_gravity else
-                   ("只读（不发帧）" if args.passive else "锁位中"))
+                + ("未读到状态帧（画面停在最后读数）" if stale else
+                   ("失力中（可手推）" if zero_gravity else
+                    ("只读（不发帧）" if args.passive else "锁位中")))
             )
 
             if now - last_print >= PRINT_DT:
                 last_print = now
-                print("  " + status_line(
-                    "真机", fraction=real_fraction,
-                    aperture_mm=fraction_to_aperture_mm(real_fraction),
-                    sdk_mm=state.position_mm, force_n=state.force_n,
-                    moving=bool(state.is_moving),
-                ))
+                if stale:
+                    print(f"  [真机] ⚠️ 读不到状态帧（等了 {FRESH_WAIT_S * 1000:.0f}"
+                          " ms）：画面停在最后一次读数上，位置和力都不可信。")
+                else:
+                    print("  " + status_line(
+                        "真机", fraction=real_fraction,
+                        aperture_mm=fraction_to_aperture_mm(real_fraction),
+                        sdk_mm=state.position_mm, force_n=state.force_n,
+                        moving=bool(state.is_moving),
+                    ))
 
             if not sim.step():
                 break

@@ -23,6 +23,12 @@ import pytest
 
 pytest.importorskip("pybullet")
 
+#: ``pressed()`` masks each event against pybullet's trigger bit, and on this
+#: build that is 2 — *not* the 1 a "key is down" event carries.  A fake that
+#: hands out a bare ``1`` therefore makes every key press a silent no-op, which
+#: is exactly what these tests are here to notice.
+from pybullet import KEY_WAS_TRIGGERED  # noqa: E402  (after importorskip)
+
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 os.environ.setdefault("LITEGRIP_PYBULLET_REEXEC", "1")
@@ -70,6 +76,16 @@ class FakeClock:
         self.now += dt
 
 
+class FakeController:
+    """The one SDK internal ``request_status_frame`` (0xCC) reaches for."""
+
+    def __init__(self) -> None:
+        self.refreshes = 0
+
+    def refresh_status(self, motor) -> None:
+        self.refreshes += 1
+
+
 class FakeGripper:
     """Stands in for a connected, enabled ``LiteGrip``.
 
@@ -77,12 +93,20 @@ class FakeGripper:
     of putting it on the bus.
     """
 
-    def __init__(self, position_rad: float = 0.0, error_code: int = 1) -> None:
+    def __init__(self, position_rad: float = 0.0, error_code: int = 1,
+                 answering: bool = True) -> None:
         self.position_rad = position_rad
         self.error_code = error_code
+        #: False = the motor is not sending status frames (a wedged motor, a
+        #: deaf master, a second program on the bus).  ``poll`` is the only
+        #: public way to tell that apart from a live one.
+        self.answering = answering
         self.frames: list[dict] = []
         self.stopped = False
         self.disconnected = False
+        self.controller = FakeController()
+        self._can = SimpleNamespace(_controller=self.controller,
+                                    _motor=object())
         self.config = SimpleNamespace(
             pos_closed_rad=POS_CLOSED_RAD,
             pos_open_rad=POS_OPEN_RAD,
@@ -94,6 +118,10 @@ class FakeGripper:
         )
 
     # ── the LiteGrip surface example 02 uses ────────────────────────────
+    def poll(self, timeout_s: float = 0.0) -> bool:
+        """``LiteGrip.poll``: True = a *new* status frame arrived just now."""
+        return self.answering
+
     def get_state(self, wait: bool = True):
         return SimpleNamespace(
             position_rad=self.position_rad,
@@ -146,9 +174,9 @@ class FakeSim:
         # pybullet's shape: {key: bitmask}; ``pressed`` tests it with ``.get``.
         self.tick += 1
         if self.confirm_at is not None and self.tick == self.confirm_at:
-            return {key: 1 for key in ex02.CONFIRM_KEYS}
+            return {key: KEY_WAS_TRIGGERED for key in ex02.CONFIRM_KEYS}
         if self.quit_at is not None and self.tick == self.quit_at:
-            return {key: 1 for key in ex02.QUIT_KEYS}
+            return {key: KEY_WAS_TRIGGERED for key in ex02.QUIT_KEYS}
         return {}
 
     def command_fraction(self, fraction: float) -> None:
@@ -276,6 +304,71 @@ class TestEnterDispatch:
             assert POS_OPEN_RAD - 1e-9 <= frame["q"] <= POS_CLOSED_RAD + 1e-9
 
 
+class PollSchedule(FakeGripper):
+    """A gripper whose status frames follow a schedule.
+
+    ``answer`` gets the poll count and decides whether that frame arrived, so a
+    test can say "answers for a while, then goes quiet" — the dangerous case,
+    because the cached position is then a *plausible old* value rather than the
+    SDK's 0.0, and nothing looks wrong until the value is used.
+    """
+
+    def __init__(self, answer, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.answer = answer
+        self.polls = 0
+
+    def poll(self, timeout_s: float = 0.0) -> bool:
+        self.polls += 1
+        return bool(self.answer(self.polls))
+
+
+class TestItWillNotActOnAnUnmeasuredPosition:
+    """Every command has to be built from a position that came off the bus.
+
+    ``MotorState._position`` starts at ``0.0`` (``litegrip/can/motor.py``) and is
+    only moved by a real status frame, while ``GripperState.timestamp`` is the
+    *local* clock — so the public snapshot cannot say how old it is, or whether it
+    was ever filled in.  Build a ramp's start and duration from one and the ramp
+    becomes a step aimed at 0 rad (5.5 % open on this calibration), which the
+    motor answers with ``kp × 1.7 rad ≈ 170 Nm`` against a ~10 Nm servo.  That is
+    the shape of "一开夹爪就起飞", so the reading is checked before it is trusted.
+    """
+
+    def test_no_frame_at_all_when_the_motor_never_answers(self, monkeypatch, capsys):
+        run = _run(monkeypatch, steps=300, confirm_at=5,
+                   gripper=FakeGripper(POS_OPEN_RAD + 0.3, answering=False))
+        assert run.gripper.frames == [], (
+            f"读不到状态帧还是发了 {len(run.gripper.frames)} 帧"
+            f"（第一帧 q={run.gripper.frames[0]['q']:.4f}）")
+        assert "不下发" in capsys.readouterr().out
+
+    def test_the_unread_zero_is_never_commanded(self, monkeypatch):
+        """``0.0`` means "never read", not "the jaws are at 0 rad"."""
+        run = _run(monkeypatch, steps=300, confirm_at=5,
+                   gripper=FakeGripper(POS_OPEN_RAD + 0.3, answering=False))
+        zeros = [f for f in run.gripper.frames if abs(f["q"]) < 1e-6]
+        assert not zeros, f"把「从没读到过」的 0.0 当目标发了 {len(zeros)} 帧"
+
+    def test_it_holds_once_the_motor_starts_answering(self, monkeypatch):
+        gripper = PollSchedule(lambda n: n > 3, position_rad=POS_OPEN_RAD + 0.3)
+        run = _run(monkeypatch, gripper=gripper, steps=300)
+        assert run.gripper.frames, "恢复应答之后还是不发帧"
+        for frame in run.gripper.frames:
+            assert frame["q"] == pytest.approx(gripper.position_rad)
+
+    def test_a_read_that_goes_quiet_refuses_the_dispatch(self, monkeypatch, capsys):
+        """The keeper's already-latched frame is still safe to repeat — a *new*
+        command is not, and must not be invented from the frozen cache."""
+        gripper = PollSchedule(lambda n: n <= 2, position_rad=POS_OPEN_RAD + 0.3)
+        run = _run(monkeypatch, gripper=gripper, steps=300, confirm_at=3)
+        assert "不下发" in capsys.readouterr().out
+        assert run.gripper.frames, "保活帧是锁位帧，读数冻结了也该照常重发"
+        for frame in run.gripper.frames:
+            assert frame["q"] == pytest.approx(gripper.position_rad), \
+                "读数冻结后又造了新的目标"
+
+
 class TestFaultHandling:
     def test_a_latched_fault_stops_the_frames_and_fails_the_run(self, monkeypatch):
         gripper = FakeGripper(position_rad=POS_OPEN_RAD + 0.3)
@@ -295,6 +388,66 @@ class TestFaultHandling:
         run = _run(monkeypatch, steps=20)
         assert run.gripper.stopped and run.gripper.disconnected
         assert run.sim.disconnected
+
+
+class TestStatusReportsMeasuredValues:
+    """``--status`` is the tool for "it reads but I can't control it", so the
+    numbers it prints have to be measurements.
+
+    A disabled motor sends no status frames, so a plain poll returns the cache —
+    and ``MotorState._position`` starts at ``0.0`` and stays there until a frame
+    arrives.  On this calibration that printed ``5.5 % / 6.63 mm`` for a gripper
+    that was really at ``−0.370222 rad`` (≈ 27.5 %): a fabricated readout, and a
+    very convincing one.  ``--status`` now asks for a frame (0xCC, which the SDK
+    documents as "does not change motor output") and, failing that, says it has
+    no reading instead of inventing one.
+    """
+
+    def _status(self, monkeypatch, capsys, gripper, timeout_ms: float = 0.0):
+        args = SimpleNamespace(
+            channel="can0", can_id=0x08, mst_id=0x18, calib=None, urdf=None,
+            headless=False, dry_run=False, status=True, clear_fault=False,
+            duration=None, force=10.0,
+        )
+        monkeypatch.setattr(ex02, "parse_args", lambda: args)
+        monkeypatch.setattr(ex02, "open_real_gripper",
+                            lambda a, enable=False: gripper)
+        # The register table lives in the SDK; what is being tested is how the
+        # value is reported, so feed it in rather than require an install.
+        monkeypatch.setattr(ex02, "read_registers",
+                            lambda g: {"TIMEOUT": timeout_ms})
+        code = ex02.main()
+        return code, capsys.readouterr().out
+
+    def test_it_asks_for_a_frame_before_printing_a_position(self, monkeypatch, capsys):
+        gripper = FakeGripper(position_rad=POS_OPEN_RAD + 0.3)
+        code, out = self._status(monkeypatch, capsys, gripper)
+        assert gripper.controller.refreshes == 1, "没有先请它回一帧就读了缓存"
+        expected = ex02.rad_to_fraction(gripper, gripper.position_rad) * 100
+        assert f"{expected:5.1f}%" in out
+        assert "6.63 mm" not in out, "又把「从没读到过」的 0.0 当成位置打印了"
+        assert code == 0
+
+    def test_no_frame_means_no_readout_instead_of_a_fake_one(self, monkeypatch, capsys):
+        code, out = self._status(monkeypatch, capsys,
+                                 FakeGripper(answering=False))
+        assert code == 1, "读不到状态帧却报了「健康」"
+        assert "读不到状态帧" in out
+        # No status line at all: no bar, no aperture, no position — the readout
+        # is the thing that must not appear half-invented.  (The text does
+        # mention 「5.5%」, but only to explain what the old fabricated print was.)
+        assert "开口" not in out and "6.63 mm" not in out, \
+            "读不到实测值时还是把 SDK 的初值当读数打印了"
+        assert "✅ 没有故障" not in out
+
+    def test_the_watchdog_registers_read_value_is_what_gets_reported(self, monkeypatch, capsys):
+        """The stored 8000 ms is not this machine's current truth: the register
+        is read live, and 0 (watchdog off) must not be reported as armed."""
+        _, live = self._status(monkeypatch, capsys, FakeGripper(), timeout_ms=0.0)
+        assert "通信超时保护 = 0" in live
+        _, stored = self._status(monkeypatch, capsys, FakeGripper(),
+                                 timeout_ms=8000.0)
+        assert "通信超时保护 = 8000" in stored
 
 
 class TestDescribingAFault:

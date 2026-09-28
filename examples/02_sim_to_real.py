@@ -48,10 +48,13 @@ import sys
 import time
 
 from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
+    FRESH_WAIT_S,
     SAFETY_BANNER,
+    STATUS_WAIT_S,
     add_common_args,
     add_hardware_args,
     fraction_to_target_rad,
+    fresh_state,
     import_litegrip,
     open_real_gripper,
     rad_to_fraction,
@@ -263,18 +266,34 @@ def fault_of(state) -> str | None:
     return f"{describe_code(state.error_code)} (0x{state.error_code:X})"
 
 
-def hold_frame(gripper) -> tuple[float, float, float, float, float]:
-    """「锁在当前位置」的一帧：``(q, kp, kd, dq, tau)``。
+def hold_frame(
+    gripper, request: bool = False
+) -> tuple[float, float, float, float, float] | None:
+    """「锁在当前位置」的一帧：``(q, kp, kd, dq, tau)``；读不到就返回 ``None``。
 
     目标就是电机**现在**的位置、零速度、零前馈——命令出来的一瞬间误差为零，所以
     不会产生任何运动，只是让手指有刚度、并且把电机的通信超时计数器喂上。
 
     这是空闲时的保活帧，也是 :meth:`LiteGrip.exit_zero_gravity` 说的「锁在当前
     位」。用它而不是 ``kp=0``：``kp=0`` 会让手指变软，可能在自重下自己出溜。
+
+    ⚠️ 「现在的位置」必须真的**是现在**，所以走 :func:`fresh_state`（等到一帧新的
+    状态帧）而不是 ``get_state(wait=False)`` 的缓存。缓存里没读到过位置时是 SDK
+    的初值 ``0.0``——拿它当目标发出去，就是一条指向 0 rad 的**阶跃**指令，电机按
+    ``kp=100`` 去追那个根本不存在的误差。少发一帧不会让电机乱动，发错目标会，
+    所以读不到就返回 ``None``，调用方负责不发。
+
+    Args:
+        request: 等之前先发一帧 READ-ONLY 的 ``0xCC`` 状态请求（见
+            :func:`_common.request_status_frame`）——电机不会自己发状态帧，不喂
+            它就不回话，所以「读到之前什么都不发」会自己把自己饿死。0xCC 不带
+            任何位置/力矩目标，是这里唯一能既不发控制帧、又让电机开口的招。
     """
+    state = fresh_state(gripper, request=request)
+    if state is None:
+        return None
     cfg = gripper.config
-    position_rad = gripper.get_state(wait=False).position_rad
-    return (position_rad, cfg.kp, cfg.kd, 0.0, 0.0)
+    return (state.position_rad, cfg.kp, cfg.kd, 0.0, 0.0)
 
 
 class IdleKeeper:
@@ -288,15 +307,22 @@ class IdleKeeper:
 
     发什么：优先「接着上一条指令的最后一帧发」——这样夹持力不会因为空闲而松掉；
     还没下发过指令时发一条锁位帧（目标 = 实测位置、零前馈），不命令任何运动。
+
+    ⚠️ 一条已经定下来的帧可以一直重发，**没读过位置就不该造新帧**。这两件事的
+    区别就是安全与危险的分界：重发同一帧，电机的目标不动，最坏也只是它没跟上；
+    而拿一个旧读数（或 ``0.0``）现造一帧，就是把「读数坏了」变成一条指向别处的
+    阶跃指令。所以本类只在初始化时定一次目标，之后一直重发；那次读不到就不发，
+    下一拍再试，读到了才开始。
     """
 
     def __init__(self, gripper, hz: float = IDLE_HZ) -> None:
         self.gripper = gripper
-        self.frame = hold_frame(gripper)
+        self.frame = hold_frame(gripper, request=True)   # None = 还没读到可信位置
         self.interval = 1.0 / hz
         self.last_sent = float("-inf")
         self.frames = 0
         self.dropped = 0
+        self.starved = 0                      # 因为读不到位置而没发帧的次数
 
     def remember(self, move: "StreamMove") -> None:
         """记住这条指令的最后一帧，之后接着按它发。"""
@@ -306,10 +332,19 @@ class IdleKeeper:
         """到点就发一帧。
 
         Returns:
-            True/False = 发出去/没发出去（未使能、已断开）；None = 还没到点。
+            True/False = 发出去了/没发出去（读不到位置、未使能、已断开）；
+            None = 还没到点。
         """
         if now - self.last_sent < self.interval:
             return None
+        if self.frame is None:
+            # 还没有一个可信的目标——宁可这一拍不发，也不拿缓存的伪值现造一帧。
+            # 但不能干等：电机不会自己发状态帧，等下去就是一直等。所以带上一帧
+            # 只读的 0xCC 请求把它叫醒，下一拍就有位置可锁了。
+            self.frame = hold_frame(self.gripper, request=True)
+            if self.frame is None:
+                self.starved += 1
+                return False
         self.last_sent = now
         q, kp, kd, dq, tau = self.frame
         if self.gripper.send_mit_frame(q=q, kp=kp, kd=kd, dq=dq, tau=tau):
@@ -326,8 +361,14 @@ def make_sliders(gripper, default_force_n: float) -> tuple[int, int]:
     """
     start_pct = 100.0
     if gripper is not None:
-        state = gripper.get_state(wait=True)
-        start_pct = rad_to_fraction(gripper, state.position_rad) * 100.0
+        state = fresh_state(gripper, request=True)   # 刚使能，先把它叫醒再读
+        if state is None:
+            # 读不到就别假装知道：起点留 100%，并说清楚它不是真机现在的开度
+            # （滑条值本身不会下发，按 Enter 才发，所以只是预览不准）。
+            print(f"   ⚠️ 读不到真机状态帧（等了 {FRESH_WAIT_S * 1000:.0f} ms）："
+                  "滑条起点只能用 100%，不代表真机现在的开度")
+        else:
+            start_pct = rad_to_fraction(gripper, state.position_rad) * 100.0
     target_id = p.addUserDebugParameter("目标开度 %", 0.0, 100.0, start_pct)
     force_id = p.addUserDebugParameter("夹持力 N", 0.0, MAX_GRIP_FORCE_N,
                                        min(default_force_n, MAX_GRIP_FORCE_N))
@@ -387,9 +428,10 @@ def run_status(args: argparse.Namespace) -> int:
     """``--status``：只连接、只读，诊断真机为什么「能读不能控」。
 
     这条路径**不使能、不发运动指令、不开窗口**：``open_real_gripper(enable=False)``
-    只做 connect + load_calibration，之后只轮询状态帧和读寄存器（DM 的读请求
-    0x33，属于询问，不是指令）。所以电机不会产生任何运动，可以在夹着工件、或
-    手指在别人手里的时候安全地跑。
+    只做 connect + load_calibration，之后发出去的只有询问帧——DM 的读请求
+    （0x33）和一次 ``0xCC`` 状态刷新（SDK 的原话："Does not change motor
+    output"），都不带位置/力矩目标。所以电机不会产生任何运动，可以在夹着工件、
+    或手指在别人手里的时候安全地跑。
 
     加 ``--clear-fault`` 才会写：发的也只是 SDK 的故障清除序列——全程
     ``kp=0/kd=0/tau=0`` 的零力矩帧，**不命令任何运动**。但要说清楚：
@@ -397,7 +439,8 @@ def run_status(args: argparse.Namespace) -> int:
     的，手指可能因自重轻微滑动。夹着东西或需要保持位置时先托住再清。
 
     Returns:
-        0 = 健康（或无故障）；1 = 有故障但没清（或清除失败）。
+        0 = 健康（或无故障）；1 = 有故障但没清、清除失败，或者**压根读不到状态
+        帧**（这种情况说「健康」是撒谎，退出码也不该是 0）。
     """
     if args.dry_run:
         raise SystemExit("❌ --status 和 --dry-run 是两件事：前者要连真机看状态，"
@@ -409,7 +452,24 @@ def run_status(args: argparse.Namespace) -> int:
     gripper = open_real_gripper(args, enable=False)
     cleared = 0
     try:
-        state = gripper.get_state(wait=True)
+        # 没使能的电机不会自己发帧，所以先请它回一帧（0xCC，只读、不改输出）
+        # 再读。少了这一步，等不到的 poll 会让 get_state() 返回 SDK 的初值
+        # 0.0——打印出来就是「5.5% / 6.63 mm」这种**伪造**读数（真值实测是
+        # −0.370 rad ≈ 27.5%），拿来判断故障只会把人带偏。
+        state = fresh_state(gripper, timeout_s=STATUS_WAIT_S, request=True)
+        if state is None:
+            print(f"   ❌ 读不到状态帧：已经请它回一帧（0xCC，不改电机输出）"
+                  f"并等了 {STATUS_WAIT_S:g} s。")
+            print("      **这种情况下没有可信的位置，也没有可信的故障码**：")
+            print("      SDK 的 get_state() 这时返回的是它自己的初值 0.0，打出来"
+                  "看着像「夹爪在 5.5%」，「从没读到过」才是它的真意。")
+            print("      查这几处：")
+            print("        · 夹爪是否上电；CAN_H/CAN_L 有没有接反；120Ω 终端电阻；")
+            print(f"        · 接口是否真的起来：ip -details link show {args.channel}")
+            print("        · 总线上是不是已经有别的程序在发帧（两个主控会互相打架，"
+                  "谁都控不住）")
+            return 1
+
         fraction = rad_to_fraction(gripper, state.position_rad)
         print("  " + status_line(
             "真机", fraction=fraction,
@@ -418,7 +478,8 @@ def run_status(args: argparse.Namespace) -> int:
             moving=bool(state.is_moving),
         ))
         print(f"   错误码 0x{state.error_code:X} · "
-              f"{describe_code(state.error_code)}")
+              f"{describe_code(state.error_code)}"
+              f"（刚要到的一帧实测值，不是缓存）")
 
         registers = read_registers(gripper)
         if registers:
@@ -430,6 +491,13 @@ def run_status(args: argparse.Namespace) -> int:
                   f"电机会锁进通信丢失故障（位置照读、指令不执行、红灯闪）。\n"
                   f"      样例 02/03 空闲时也在持续发帧，就是为了不让它到期；\n"
                   f"      只读不喂帧（或跑了别的只读脚本）同样会把它看哑。")
+        elif "TIMEOUT" in registers:
+            print("   ⏱  通信超时保护 = 0：**这台机器上它当前不生效**，不喂帧也"
+                  "不会因此锁故障。")
+            print("      （同一台机器 2026-09-24 读到的是 8000 ms——这个值会变，"
+                  "以这里的实测为准。）")
+            print("      样例 02/03 照样持续发帧：换个电机、或有人改过这个寄存器，"
+                  "结论就不一样。")
 
         if not state.is_error:
             print("   ✅ 没有故障。真机能正常接受指令——想动它就直接跑本样例"
@@ -556,7 +624,19 @@ def main() -> int:
                           f"夹持力 {grip_n:.1f} N · 斜坡 {duration_s:g} s + "
                           f"保持 {DEFAULT_HOLD_S:g} s")
                 else:
-                    state = gripper.get_state(wait=False)
+                    # ⚠️ 这里**必须**拿到新鲜的位置：斜坡的起点、方向和时长全按它
+                    # 算。用缓存里的旧值（或从没读到过时的 0.0），起点就落在别处、
+                    # 时长还能算成 ~0——合起来就是一条阶跃指令，正是「一开夹爪就
+                    # 起飞」的形态。所以拿不到就拒绝下发，别猜。
+                    state = fresh_state(gripper, request=True)
+                    if state is None:
+                        print(f"\n❌ 读不到真机的状态帧（先请它回了一帧，又等了 "
+                              f"{FRESH_WAIT_S * 1000:.0f} ms），**不下发**：")
+                        print("   斜坡的起点和时长都要按「现在」的位置算，拿旧读数"
+                              "算出来的是一条阶跃指令，电机接不住。")
+                        print("   先看真机怎么了："
+                              "python3 examples/02_sim_to_real.py --status")
+                        continue
                     fault = fault_of(state)
                     if fault:
                         # 锁死的故障下，发什么都白搭，还会掩盖真正的原因
@@ -613,9 +693,16 @@ def main() -> int:
             elif keeper is not None and not faulted:
                 # 空闲保活。见 :class:`IdleKeeper`：停发 = 等电机的通信超时
                 # 保护把真机锁成故障态。
-                if keeper.maybe_send(now) is False and keeper.dropped == 1:
+                sent = keeper.maybe_send(now)
+                if sent is False and keeper.dropped == 1:
                     print("   ⚠️ 空闲保活帧没发出去（send_mit_frame 返回 "
                           "False）：真机可能未使能或已断开")
+                elif sent is False and keeper.starved and keeper.starved % 200 == 1:
+                    # 不是「发失败」，是「不敢发」：保活帧的目标必须是实测位置，
+                    # 读不到就不造这一帧（见 IdleKeeper）。每 200 次报一次免得刷屏。
+                    print(f"   ⚠️ 读不到真机状态帧，保活帧发不出去（第 "
+                          f"{keeper.starved} 次）：目标得按实测位置算，拿不到就不发。"
+                          f"\n      查 CAN 连接和供电，或先跑 --status 看真机状态。")
 
             real = read_real(gripper)
             if real is None:

@@ -62,11 +62,17 @@ CLOSED_RAD = 0.114
 class RecordingGripper:
     """Stands in for ``LiteGrip``: records frames instead of sending CAN."""
 
-    def __init__(self, ok: bool = True) -> None:
+    def __init__(self, ok: bool = True, answering: bool = True) -> None:
         self.frames: list[dict] = []
         self.ok = ok
         self.position_rad = OPEN_RAD
+        #: False = this motor is not sending status frames, so nothing it says
+        #: about where it is can be trusted (``LiteGrip.poll`` answers that).
+        self.answering = answering
         self.config = _config().config
+
+    def poll(self, timeout_s: float = 0.0) -> bool:
+        return self.answering
 
     def send_mit_frame(self, q, kp, kd, dq=0.0, tau=0.0) -> bool:
         self.frames.append(dict(q=q, kp=kp, kd=kd, dq=dq, tau=tau))

@@ -176,6 +176,106 @@ class TestRadToFraction:
         )
 
 
+class FakeController:
+    """Records what the 0xCC request path touches."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def refresh_status(self, motor) -> None:
+        self.calls.append(("refresh_status", motor))
+
+
+class FakeGrip:
+    """Just the ``LiteGrip`` surface :func:`_common.fresh_state` uses."""
+
+    def __init__(self, answering: bool = True, can=None) -> None:
+        self.answering = answering
+        self._can = can
+        self.polls: list[float] = []
+        self.reads = 0
+
+    def poll(self, timeout_s: float = 0.0) -> bool:
+        self.polls.append(timeout_s)
+        return self.answering
+
+    def get_state(self, wait: bool = True):
+        self.reads += 1
+        return SimpleNamespace(position_rad=0.42)
+
+
+def _fake_can(controller=None, motor=None):
+    return SimpleNamespace(_controller=controller or FakeController(),
+                           _motor=motor or object())
+
+
+class TestFreshState:
+    """``fresh_state`` is the only sanctioned way to read the real position.
+
+    ``get_state()`` throws away ``update_state()``'s return value and stamps the
+    snapshot with the *local* clock, so nothing in the public API says whether the
+    cached position is current.  ``poll()`` does: True means a status frame for
+    this motor just arrived.
+    """
+
+    def test_a_fresh_frame_returns_the_state(self):
+        gripper = FakeGrip()
+        state = _common.fresh_state(gripper, timeout_s=0.25)
+        assert state is not None
+        assert state.position_rad == 0.42
+        assert gripper.polls == [0.25]
+
+    def test_no_frame_returns_none_without_reading_the_cache(self):
+        """A cache known to be stale must not be read at all — reading it is how
+        a frozen value gets mistaken for a measurement."""
+        gripper = FakeGrip(answering=False)
+        assert _common.fresh_state(gripper) is None
+        assert gripper.reads == 0, "等不到帧还去读了缓存"
+
+    def test_it_can_wake_the_motor_up_first(self):
+        """A motor that is not being fed never speaks; 0xCC asks it to."""
+        controller = FakeController()
+        motor = object()
+        gripper = FakeGrip(can=_fake_can(controller, motor))
+        _common.fresh_state(gripper, request=True)
+        assert controller.calls == [("refresh_status", motor)]
+        assert gripper.reads == 1
+
+    def test_the_wake_up_call_is_read_only(self):
+        """``refresh_status`` is documented "does not change motor output" — the
+        fake records only that one call, so no control frame can slip in."""
+        controller = FakeController()
+        gripper = FakeGrip(can=_fake_can(controller))
+        _common.fresh_state(gripper, request=True)
+        assert [name for name, _ in controller.calls] == ["refresh_status"]
+
+    def test_no_request_is_sent_unless_asked_for(self):
+        controller = FakeController()
+        gripper = FakeGrip(can=_fake_can(controller))
+        _common.fresh_state(gripper)
+        assert controller.calls == []
+
+    @pytest.mark.parametrize("can", [
+        None,                                             # 没连上
+        SimpleNamespace(),                                # 没有 _controller/_motor
+        SimpleNamespace(_controller=object(), _motor=object()),   # 老 SDK 没这方法
+    ])
+    def test_it_degrades_quietly_when_the_sdk_has_no_hook(self, can):
+        """Borrowing an internal must never be able to break the caller."""
+        gripper = FakeGrip(can=can)
+        assert _common.fresh_state(gripper, request=True) is not None
+        assert _common.request_status_frame(gripper) is False
+
+    def test_a_failing_transport_is_not_fatal(self):
+        class Exploding(FakeController):
+            def refresh_status(self, motor):
+                raise OSError("CAN 掉线了")
+
+        gripper = FakeGrip(can=_fake_can(Exploding()))
+        assert _common.request_status_frame(gripper) is False
+        assert _common.fresh_state(gripper, request=True) is not None
+
+
 class TestStatusLine:
     def test_contains_the_opening_and_aperture(self):
         line = _common.status_line("仿真", fraction=0.5, aperture_mm=44.3)

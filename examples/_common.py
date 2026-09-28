@@ -9,6 +9,8 @@
   add_common_args()  --urdf / --headless
   add_hardware_args() --channel / --can-id / --mst-id / --calib
   open_real_gripper() 连接 → 载入标定 → 使能，失败时给出可读的提示
+  fresh_state()      等到一帧**新**的状态帧再读位置；等不到返回 None
+                     （读真机位置只该走这里，别直接读 get_state() 的缓存）
 
 ⚠️ 02/03 会驱动真机！真机的两个手指会真的闭合。首次跑请：
   1) 把夹爪拿在手上或固定在台面上，**手指行程内不要放任何东西**；
@@ -34,9 +36,11 @@ __all__ = [
     "check_calibration",
     "ensure_deps",
     "fraction_to_target_rad",
+    "fresh_state",
     "import_litegrip",
     "open_real_gripper",
     "rad_to_fraction",
+    "request_status_frame",
     "sdk_dir",
     "status_line",
 ]
@@ -257,6 +261,79 @@ def rad_to_fraction(gripper, position_rad: float) -> float:
     if cfg.max_stroke_mm <= 0.0:
         return 0.0
     return max(0.0, min(1.0, position_mm / cfg.max_stroke_mm))
+
+
+#: 读真机状态时最多等一帧状态帧的时间 [s]。SDK 的 ``get_state(wait=True)`` 内部
+#: 也是等 50 ms，这里对齐它。
+FRESH_WAIT_S = 0.05
+
+#: 只读路径（``--status``）等一帧的时间 [s]：那条路径自己不发帧，得先请电机回
+#: 一帧，所以给得比 :data:`FRESH_WAIT_S` 宽。
+STATUS_WAIT_S = 0.5
+
+
+def request_status_frame(gripper) -> bool:
+    """请电机主动回一帧状态（DM 的 ``0xCC`` 刷新，**不改变电机输出**）。
+
+    SDK 没把这件事包成公开方法，只有 ``LiteGripCAN`` 内部的
+    ``controller.refresh_status``。所以这里借内部接口，而且**拿不到就当没有**：
+    SDK 哪天改了结构，这里退回「只 poll」，不会把调用方带崩。
+
+    为什么需要它：**没使能的电机不会自己发帧**，光 poll 永远等不到状态帧，于是
+    ``get_state()`` 返回的是 ``MotorState._position`` 的初值 ``0.0``——那不是
+    「夹爪在 0 弧度」，是「从没读到过」。只读诊断想看真实位置，就得主动要一帧
+    （实测：电机答 0xCC 时读到 −0.370 rad，而缓存说是 0.0）。
+
+    Returns:
+        True = 请求已发出（不代表电机回了帧），False = 这个 SDK 发不了。
+    """
+    can = getattr(gripper, "_can", None)
+    controller = getattr(can, "_controller", None)
+    motor = getattr(can, "_motor", None)
+    if controller is None or motor is None:
+        return False
+    refresh = getattr(controller, "refresh_status", None)
+    if refresh is None:
+        return False
+    try:
+        refresh(motor)
+    except Exception:      # 传输层没起来等等，一律当作「没有这个能力」
+        return False
+    return True
+
+
+def fresh_state(gripper, timeout_s: float = FRESH_WAIT_S, *, request: bool = False):
+    """等到一帧**新**的状态帧再读缓存；等不到返回 ``None``。
+
+    这是本仓库读真机位置的正确入口（02/03 都用它），因为「读到的位置是不是
+    *现在*的」这件事，SDK 的公开接口里只有 :meth:`LiteGrip.poll` 能回答：
+
+    * ``get_state()`` 把 ``update_state()`` 的返回值丢掉了，看不出有没有等到帧；
+    * ``GripperState.timestamp`` 是本机时钟 ``time.time()``，不是帧的时间戳，
+      所以拿到快照也看不出它有多旧；
+    * poll 返回 True 的含义就是「刚收到的这一帧是我们电机的状态帧」（读寄存器
+      的应答不算），正是需要的信号。
+
+    为什么非要问这一句：缓存里可能是 ``MotorState._position`` 的初值 ``0.0``，
+    或者一个冻结的旧值。拿它当「现在的位置」去算目标角和斜坡时长，算出来的是一
+    条指向别处的**阶跃**指令——电机按 kp=100 去追一个不存在的误差，就是「一开
+    夹爪就起飞」的形态。所以拿不到新鲜读数时，调用方应当**拒绝下发**，而不是
+    猜一个值。
+
+    Args:
+        timeout_s: 最多等多久 [s]。
+        request: 等之前先发一帧只读的 ``0xCC`` 请求，见
+            :func:`request_status_frame`——电机没在主动发帧时（未使能、或者
+            没人喂帧）才需要。
+
+    Returns:
+        ``GripperState``；``timeout_s`` 内没有新的状态帧则 ``None``。
+    """
+    if request:
+        request_status_frame(gripper)
+    if not gripper.poll(timeout_s=timeout_s):
+        return None
+    return gripper.get_state(wait=False)
 
 
 def status_line(
