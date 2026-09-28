@@ -630,7 +630,10 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
         # 标定必须在 enable 之前载入：SDK 的毫米刻度依赖它
         load_chosen_calibration(gripper, calib_path, calib)
         if not enable:
-            print("[真机] 已连接、已载入并核实标定（未使能，不发送任何帧）")
+            # 只说「不发送运动指令」：--status 走这条路（未使能），但它之后会发
+            # 只读的 0xCC 询问帧把状态叫回来——那同样是 CAN 帧，说「一帧都不发」
+            # 就把话说大了。03 的 --passive 才是真的一帧不发，它自己会这么说。
+            print("[真机] 已连接、已载入并核实标定（未使能，不发送任何运动指令）")
             return gripper
         if not gripper.enable():
             raise SystemExit("❌ 使能失败：夹爪可能处于错误状态或未上电")
