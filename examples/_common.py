@@ -11,6 +11,7 @@
   add_hardware_args() --channel / --can-id / --mst-id / --calib
   choose_calibration_file() 定下这次用**哪一份**标定：--calib 指定，或当场从候选里
                      选。**不接受默认标定**，也不回退出厂标定
+  calibration_config()  把标定文件装成 ``gripper.config`` 的形状（--dry-run 用）
   open_real_gripper() 连接 → 载入并核实标定 → 使能，失败时给出可读的提示
   fresh_state()      等到一帧**新**的状态帧再读位置；等不到返回 None
                      （读真机位置只该走这里，别直接读 get_state() 的缓存）
@@ -39,9 +40,12 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 __all__ = [
     "CALIBRATIONS_DIR",
+    "NOMINAL_KD",
+    "NOMINAL_KP",
     "NOMINAL_STROKE_MM",
     "REQUIRED_CALIB_KEYS",
     "REQUIRED_SDK_API",
@@ -51,6 +55,7 @@ __all__ = [
     "add_hardware_args",
     "bootstrap_src",
     "calibration_candidates",
+    "calibration_config",
     "calibration_summary",
     "check_calibration",
     "check_calibration_matches_args",
@@ -270,6 +275,29 @@ _CALIB_FIELDS: tuple[tuple[str, str], ...] = (
 #: （它是「名义行程」而不是量出来的尺寸），所以只读文件、拿不到 config 的
 #: ``--dry-run`` 用这个值做自洽性检查。
 NOMINAL_STROKE_MM = 120.0
+
+#: SDK ``GripperConfig`` 里 ``kp``/``kd`` 的默认值。标定文件里这两项**可选**，
+#: 缺了 SDK 就留着 config 上的原值（``load_calibration`` 只对出现在文件里的键
+#: ``setattr``），也就是这两个数。
+NOMINAL_KP = 100.0
+NOMINAL_KD = 2.0
+
+
+def calibration_config(data: dict, *, max_stroke_mm: float = NOMINAL_STROKE_MM):
+    """把一份标定文件装成 ``gripper.config`` 的形状。
+
+    ``--dry-run`` 不连真机、也就没有 SDK 的 ``GripperConfig``，但它走的正是这套
+    参数（目标角、毫米刻度、kp/kd），照样需要一个 config 来算。这里按
+    :data:`_CALIB_FIELDS` 那张表装，字段名不另写一份；缺的可选字段沿用 SDK 的
+    默认值（见 :data:`NOMINAL_KP`）。``max_stroke_mm`` 不在标定文件里，用名义值。
+
+    只用于「不碰真机、但要算同一套数」的场合。真机路径上用的永远是 SDK 自己那份
+    ``gripper.config``——那份是 :func:`load_chosen_calibration` 核实过的。
+    """
+    values: dict[str, object] = {"kp": NOMINAL_KP, "kd": NOMINAL_KD}
+    values.update({attr: data[key] for key, attr in _CALIB_FIELDS if key in data})
+    values["max_stroke_mm"] = max_stroke_mm
+    return SimpleNamespace(**values)
 
 
 def calibration_candidates(directories=None) -> list[Path]:

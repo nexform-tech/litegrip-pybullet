@@ -181,6 +181,85 @@ def _interactive(monkeypatch, on: bool) -> None:
         stdin=SimpleNamespace(isatty=lambda: on)))
 
 
+class TestCalibrationConfig:
+    """``--dry-run`` has no SDK and therefore no ``GripperConfig`` -- but it runs
+    the *same* arithmetic, so it needs a stand-in that is shaped like one.
+
+    The property that matters is not "the attributes exist" but "the helpers
+    cannot tell the difference": a dry run that computes its target angle from a
+    differently-shaped config would be advertising a number the real run never
+    uses.  So most of these tests go through ``fraction_to_target_rad`` /
+    ``rad_to_fraction`` rather than reading attributes.
+    """
+
+    def test_it_renames_the_file_keys_to_the_sdk_names(self):
+        """The file says ``zero_position_rad``; the SDK's config says
+        ``pos_closed_rad``.  Getting that mapping backwards would mirror the
+        whole travel, which is exactly the kind of quiet error the dry run is
+        supposed to surface rather than hide."""
+        cfg = _common.calibration_config(dict(CALIB))
+        assert cfg.pos_closed_rad == CALIB["zero_position_rad"]
+        assert cfg.pos_open_rad == CALIB["max_position_rad"]
+        assert cfg.rad_to_mm == pytest.approx(CALIB["rad_to_mm"])
+        assert cfg.kp == CALIB["kp"]
+        assert cfg.kd == CALIB["kd"]
+
+    def test_the_helpers_compute_what_the_real_path_computes(self):
+        """Same numbers as ``_config()``, which is what ``load_calibration``
+        leaves behind on hardware: 0 % is closed, 100 % is open, and the two
+        conversions invert each other."""
+        dry = SimpleNamespace(config=_common.calibration_config(dict(CALIB)))
+        real = _config()
+        assert (_common.fraction_to_target_rad(dry, 0.0)
+                == pytest.approx(_common.fraction_to_target_rad(real, 0.0)))
+        assert (_common.fraction_to_target_rad(dry, 1.0)
+                == pytest.approx(_common.fraction_to_target_rad(real, 1.0)))
+        for fraction in (0.0, 0.25, 0.5, 1.0):
+            target = _common.fraction_to_target_rad(dry, fraction)
+            assert _common.rad_to_fraction(dry, target) == pytest.approx(fraction)
+
+    def test_it_passes_the_same_self_consistency_check(self):
+        dry = SimpleNamespace(config=_common.calibration_config(dict(CALIB)))
+        _common.check_calibration(dry)          # must not raise
+
+    def test_an_inconsistent_file_still_stops_the_dry_run(self):
+        """The dry run is how a first-time user checks their calibration file,
+        so it has to reject the same files the real path rejects."""
+        bad = dict(CALIB, zero_position_rad=-1.731, max_position_rad=0.114)
+        dry = SimpleNamespace(config=_common.calibration_config(bad))
+        with pytest.raises(SystemExit, match="标定"):
+            _common.check_calibration(dry)
+
+    def test_a_file_without_kp_keeps_the_sdk_default(self):
+        """``kp``/``kd`` are optional in the file, and ``load_calibration`` only
+        sets the keys that are present -- so a missing one must not become 0.0,
+        which would command a motor with no position term at all."""
+        data = {k: v for k, v in CALIB.items() if k not in ("kp", "kd")}
+        cfg = _common.calibration_config(data)
+        assert cfg.kp == _common.NOMINAL_KP
+        assert cfg.kd == _common.NOMINAL_KD
+
+    def test_it_does_not_invent_the_keys_the_file_left_out(self):
+        """``mst_id``/``can_id`` live in the file too, but they are checked
+        against the command line before this point.  A default here would be a
+        second, contradictory answer."""
+        data = dict(CALIB, kp=5.0, kd=2.0)
+        data.pop("can_id")
+        data.pop("channel")
+        cfg = _common.calibration_config(data)
+        assert not hasattr(cfg, "can_id")
+        assert not hasattr(cfg, "can_channel")
+        assert cfg.mst_id == CALIB["mst_id"]
+
+    def test_the_stroke_is_a_nominal_override_not_a_calibrated_one(self):
+        """``max_stroke_mm`` is nowhere in the file: it is the millimetre scale
+        the SDK names, so the caller says which one to assume."""
+        assert (_common.calibration_config(dict(CALIB)).max_stroke_mm
+                == _common.NOMINAL_STROKE_MM)
+        assert (_common.calibration_config(dict(CALIB), max_stroke_mm=60.0)
+                .max_stroke_mm == 60.0)
+
+
 class TestChoosingCalibration:
     """Which calibration file this run uses is a *decision*, made every time.
 
