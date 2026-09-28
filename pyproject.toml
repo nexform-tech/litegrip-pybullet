@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "litegrip-pybullet"
+# Placeholder, not a version: releases are cut by semantic-release in CI and the
+# git tag is the only source of truth, so never edit this to a real number.
+#
+# The repository standard spells the placeholder `0.0.0-semantic-release`, which
+# is valid semver but *not* valid PEP 440 — pip and setuptools reject the whole
+# pyproject.toml, so `pip install -e .` fails before it does anything. Moving the
+# marker into a local version segment keeps the same meaning (`0.0.0`, tagged
+# "semantic-release") in valid PEP 440. It normalises to `0.0.0+semantic.release`.
+version = "0.0.0+semantic-release"
+description = "PyBullet simulation environment for the LiteGrip two-finger gripper"
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["gripper", "robotics", "simulation", "pybullet", "litegrip"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pybullet>=3.2",
+    # pybullet's wheel declares no requirements of its own, but importing it
+    # fails without numpy ("ImportError: numpy._core.multiarray failed to
+    # import"), so it has to be required here or a clean install is unusable.
+    "numpy>=1.20",
+]
+
+[project.optional-dependencies]
+hardware = ["litegrip>=2.2"]
+test = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/nexform-tech/litegrip-pybullet"
+Repository = "https://github.com/nexform-tech/litegrip-pybullet"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["litegrip_pybullet*"]
+
+[tool.setuptools.package-data]
+litegrip_pybullet = [
+    "py.typed",
+    "assets/litegrip_urdf/urdf/*.urdf.xacro",
+    "assets/litegrip_urdf/meshes/*.STL",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+# src/ 布局：让测试直接跑未安装的检出（CI 里也会 pip install，双保险）
+pythonpath = ["src"]

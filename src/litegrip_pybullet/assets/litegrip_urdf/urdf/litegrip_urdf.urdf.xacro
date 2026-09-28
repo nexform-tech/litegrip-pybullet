@@ -1,0 +1,226 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ============================================================================
+  LiteGrip 平行夹爪 —— ROS 2 机器人描述文件 (xacro)
+  ============================================================================
+
+  几何与惯性参数源自 SolidWorks URDF Exporter 导出结果，未作改动。
+  本文件在原导出文件基础上修正了下列问题（详见 README.md「修订记录」）：
+
+    1. joint limit 的 upper 值 "0.043.5" 非法（多一个小数点），
+       原文件无法被任何 URDF 解析器加载。此处参数化，默认取实测单指行程
+       0.042726（mesh 理论值为 0.0435，见下）。
+    2. 新增无惯性 dummy 根节点 base_footprint，消除 KDL
+       「root link has an inertia」告警。
+    3. 补全材质名称（原为空字符串）。
+    4. 补充 <dynamics> 阻尼/摩擦。
+    5. 补充 <ros2_control> 硬件接口描述。
+
+  坐标系与关节约定（重要，请务必阅读后使用）：
+    · 两指的 prismatic axis 方向相反：right 为 +X，left 为 -X。
+    · 因此 **两个关节取同号值 = 两指向同一方向运动**（同号闭合、同号张开）。
+      按「一正一负」的直觉编写控制器会导致两指反向运动。
+    · joint = 0         两指内侧面位于 x = ±0.0435，处于最大张开位（模型开口 87 mm，
+                        本机卡尺实测张开开口 86.960 mm）
+    · joint = 0.042726  实测闭合标定位置（本机实测闭合间隙 1.508 mm）
+
+  行程取值的两个口径（勿混）：
+    · mesh 理论闭合行程 0.0435 m —— 由 mesh 包围盒核算：
+      gripper_slider_link1.STL 的 X 范围为 [-0.0010, +0.0235]，
+      关节原点位于 x = -0.067，故闭合行程 = 0.067 - 0.0235 = 0.0435。
+      该值对应两指内侧面恰好贴合于 x = 0（零间隙）。
+    · 实测单指行程 0.042726 m —— 本机卡尺实测总机械行程 85.452 mm，
+      即本文件 stroke 的默认值。
+    ⚠ 请勿将 upper 改回原生 CSV 中的 0.067，那会使两指完全重叠穿透。
+    ⚠ 改用 0.042726 后，模型两端位形仍需在运行时做 mesh/TF 复核。
+  ============================================================================
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="litegrip_urdf">
+
+  <!-- ======================== 可配置参数 ======================== -->
+  <!-- 用法: xacro litegrip_urdf.urdf.xacro stroke:=0.042726 -->
+
+  <!-- 单指行程 (m)，即关节 limit 的 upper。默认值 = 本机实测单指行程；
+       mesh 理论值为 0.0435，如需与 CAD 几何严格一致可显式传 stroke:=0.0435 -->
+  <xacro:arg name="stroke" default="0.042726"/>
+  <!-- 关节最大输出力 (N)。⚠ 10.0 为 SolidWorks 导出默认占位值，请按实际电机/传动标定 -->
+  <xacro:arg name="effort" default="10.0"/>
+  <!-- 关节最大速度 (m/s)。⚠ 0.2 同为导出默认占位值，请按实测标定 -->
+  <xacro:arg name="velocity" default="0.2"/>
+  <!-- 关节阻尼与摩擦。⚠ 保守初值，仅用于抑制仿真振荡，请按实测标定 -->
+  <xacro:arg name="joint_damping" default="0.05"/>
+  <xacro:arg name="joint_friction" default="0.02"/>
+  <!-- ros2_control 硬件插件。默认 mock 插件仅用于打通控制链路与仿真；
+       ⚠ 接入真机时请替换为厂商硬件接口插件 -->
+  <xacro:arg name="hardware_plugin" default="mock_components/GenericSystem"/>
+
+  <!-- ======================== 材质定义 ======================== -->
+  <material name="litegrip_base">
+    <color rgba="0.898039 0.917647 0.929412 1.0"/>
+  </material>
+  <material name="litegrip_finger">
+    <color rgba="1.0 1.0 1.0 1.0"/>
+  </material>
+
+  <!-- ======================== 根节点 ======================== -->
+  <!--
+    base_footprint 是无惯性的 dummy 根节点，与 base_link 位姿完全重合。
+    KDL 不支持带惯性的 root link（会告警并静默忽略 base_link 的惯性），
+    引入该节点后 TF 树具有合法树根，MoveIt / KDL 可正常使用。
+    夹爪作为末端执行器安装到机械臂时，请以 base_footprint 作为附着基准。
+  -->
+  <link name="base_footprint"/>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ======================== 夹爪本体 ======================== -->
+  <link name="base_link">
+    <inertial>
+      <origin xyz="-7.90239142174285E-05 3.69945158980779E-05 -0.0166444528152071" rpy="0 0 0"/>
+      <mass value="0.506299067530095"/>
+      <inertia
+        ixx="0.00014051955761899"
+        ixy="-3.65495959038658E-06"
+        ixz="-5.8232760915628E-07"
+        iyy="0.000308492795970996"
+        iyz="5.76221363581957E-07"
+        izz="0.000345331384983772"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_urdf/meshes/base_link.STL"/>
+      </geometry>
+      <material name="litegrip_base"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_urdf/meshes/base_link.STL"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ======================== 指 1（右指） ======================== -->
+  <link name="gripper_slider_link1">
+    <inertial>
+      <origin xyz="0.0133451305147342 -0.00404000727940517 0.0126301584041473" rpy="0 0 0"/>
+      <mass value="0.0354537367324049"/>
+      <inertia
+        ixx="1.73250515551137E-05"
+        ixy="2.99209722680213E-08"
+        ixz="-1.48556364855832E-06"
+        iyy="1.26496403976931E-05"
+        iyz="9.04302312412081E-08"
+        izz="6.96029785351275E-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_urdf/meshes/gripper_slider_link1.STL"/>
+      </geometry>
+      <material name="litegrip_finger"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_urdf/meshes/gripper_slider_link1.STL"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="gripper_slide_joint_right" type="prismatic">
+    <origin xyz="-0.067 0.0010833 0.034083" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child link="gripper_slider_link1"/>
+    <axis xyz="1 0 0"/>
+    <limit
+      lower="0.0"
+      upper="$(arg stroke)"
+      effort="$(arg effort)"
+      velocity="$(arg velocity)"/>
+    <dynamics damping="$(arg joint_damping)" friction="$(arg joint_friction)"/>
+  </joint>
+
+  <!-- ======================== 指 2（左指） ======================== -->
+  <link name="gripper_slider_link2">
+    <inertial>
+      <origin xyz="-0.0133451305147341 0.0040400072794052 0.0126301584041473" rpy="0 0 0"/>
+      <mass value="0.0354537367324048"/>
+      <inertia
+        ixx="1.73250515551138E-05"
+        ixy="2.99209722680244E-08"
+        ixz="1.4855636485583E-06"
+        iyy="1.26496403976931E-05"
+        iyz="-9.04302312413309E-08"
+        izz="6.96029785351283E-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_urdf/meshes/gripper_slider_link2.STL"/>
+      </geometry>
+      <material name="litegrip_finger"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://litegrip_urdf/meshes/gripper_slider_link2.STL"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="gripper_slide_joint_left" type="prismatic">
+    <origin xyz="0.067 -0.0010833 0.034083" rpy="0 0 0"/>
+    <parent link="base_link"/>
+    <child link="gripper_slider_link2"/>
+    <axis xyz="-1 0 0"/>
+    <limit
+      lower="0.0"
+      upper="$(arg stroke)"
+      effort="$(arg effort)"
+      velocity="$(arg velocity)"/>
+    <dynamics damping="$(arg joint_damping)" friction="$(arg joint_friction)"/>
+  </joint>
+
+  <!-- ======================== ros2_control 硬件接口 ======================== -->
+  <!--
+    两关节的 command/state interface 均声明为 position，
+    与 config/litegrip_controllers.yaml 中 JointGroupPositionController 的配置对应。
+
+    hardware_plugin 默认为 mock_components/GenericSystem：
+    它将下发的 position 指令直接回读为 state，用于在没有真实硬件的情况下
+    验证控制链路、跑通仿真与集成测试。
+    接入真机时通过 launch 参数覆盖：
+      ros2 launch litegrip_urdf ros2_control.launch.py \
+        hardware_plugin:=<厂商插件名>
+  -->
+  <ros2_control name="litegrip_system" type="system">
+    <hardware>
+      <plugin>$(arg hardware_plugin)</plugin>
+    </hardware>
+
+    <joint name="gripper_slide_joint_right">
+      <command_interface name="position">
+        <param name="min">0.0</param>
+        <param name="max">$(arg stroke)</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <joint name="gripper_slide_joint_left">
+      <command_interface name="position">
+        <param name="min">0.0</param>
+        <param name="max">$(arg stroke)</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+</robot>
