@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""样例 02 · 仿真控制真机：在 PyBullet 窗口里调目标，按 Enter 才下发
+"""样例 02 · 仿真控制真机：拖滑条，真机跟着走
 
-方向是 **仿真 → 真机**：仿真这边是「主」，你在这里决定开度和夹持力，真机是
-「从」，收到指令才动。
+方向是 **仿真 → 真机**：滑条是手里的操纵杆，真机跟着它动。
 
 流程（全在 PyBullet 窗口里操作）：
 
-  1. 拖滑条「目标开度」——仿真手指**实时跟着滑条走**，这是预览，真机还没动。
-     预览本身也受 85 mm/s 的速度限制，所以「看到什么速度，真机就是什么速度」。
-  2. 拖滑条「夹持力」——下发时作为前馈力矩给电机（夹住工件时的推力）。
-  3. 按 **Enter / 空格** 才真的下发：真机**斜坡**走过去，到位后再加力顶住
-     （200 Hz 发帧）。仿真显示的是**命令值**，真机的实测值在旁边对照——两者
-     的差就是真机的跟随误差，顶住工件时这个差会一直留着，正好用来判断
-     「夹到了没有」。
-  4. **Esc / Q** 退出，退出前会**明确失能**（0xFD）：电机不再出力，手指会松、
+  1. 启动后真机**不动**：本样例按 200 Hz 发「锁在实测位置」的保持帧，同时把真机
+     的实测位置实时镜像进窗口——窗口显示的是真机**现在在哪**，不是你想让它去哪。
+  2. 拖滑条「**目标开度**」——真机才开始走，**拖动直接生效**，不用再按 Enter。
+     真机的目标是滑条值，但位置目标每帧最多前进「速度 %」允许的距离
+     （见 :class:`SliderDrive`），所以把滑条一拽到底，真机也是按速度滑条限定的
+     速度走完全程，不会跟着你的手跳。
+  3. 拖滑条「**速度 %**」——位置目标的最大速率，100% 就是手指额定
+     :data:`RATED_SPEED_MM_S`。随时可调：拖快滑条真机也不会跟着快。
+  4. 拖滑条「**夹持力**」——手指到位后用这个力矩顶住（夹住工件时的推力）。
+  5. **Esc / Q** 退出，退出前会**明确失能**（0xFD）：电机不再出力，手指会松、
      夹着的工件会掉，但不会在电机上留下通信超时故障（原因见下）。
 
-⚠️ 会驱动真机！第一次跑务必先 dry-run：
+⚠️ 会驱动真机！**没有「确认」这一步了**：滑条被碰到（鼠标划过、方向键、触控板）
+就会发指令，所以别把手放在滑条上，也别在真机动的时候去点窗口。第一次跑务必先
+dry-run：
 
     python3 examples/02_sim_to_real.py --dry-run    # 只开窗口，绝不碰 CAN
 
@@ -35,7 +38,7 @@
 
     python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
     python3 examples/02_sim_to_real.py                # 不给就当场从候选里选
-    python3 examples/02_sim_to_real.py --force 20 --duration 2
+    python3 examples/02_sim_to_real.py --force 20 --speed 40
     python3 examples/02_sim_to_real.py --channel can1        # 换 CAN 口
 
 **真机「能读不能控」怎么办**（位置读得到、发指令不动、驱动板红灯闪）：
@@ -48,22 +51,23 @@
 ……）。两类原因最常见：
 
   * **没人喂帧**：使能态的电机静默约 :data:`MEASURED_COMM_LOSS_S` 就报 0xD。所以
-    空闲也得持续发帧（见 :class:`IdleKeeper`）。
+    空闲也得持续发帧（见 :class:`IdleKeeper`）——本样例空闲时发的是锁位帧。
   * **一条接不住的指令**：MIT 的 kp 是位置刚度，一整段行程的阶跃会让电机在第一帧
     就被要求输出 ``kp × 1.845 rad`` 那么大的力矩。SDK 默认 kp=100 Nm/rad，那是
     185 Nm，而额定只有 ~10 Nm；本机标定现在是 5.0，同样的阶跃约 9 Nm。但 kp 是
-    标定文件里的一项、随时可能被改回去，所以本样例发的是**斜坡**
-    （见 :class:`StreamMove`），和 SDK 自己的 ``goto_rad`` 一样，不押在某个 kp 上。
+    标定文件里的一项、随时可能被改回去，所以本样例限制的是**位置目标每帧走多远**
+    （见 :class:`SliderDrive`），和 kp 取多少无关，也和滑条被拽得多快无关。
 
 为什么要自己发帧：SDK 的 move_to()/goto_rad() 内部是 control_mit_stream()，
 它自己 sleep 5 ms 循环、不让出控制权，PyBullet 窗口会卡住、也读不到按键。
 所以这里用 SDK 公开的 send_mit_frame() + poll() 自己组循环——这正是它们被
-公开出来的用途（自定义控制循环，自己管时序）。斜坡的插值方式照抄 SDK 的
-``_move_at_speed_rad``，两边走出来的速度是同一条曲线。
+公开出来的用途（自定义控制循环，自己管时序）。
 """
 import argparse
+import math
 import sys
 import time
+from types import SimpleNamespace
 
 from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     FRESH_WAIT_S,
@@ -72,6 +76,7 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     STATUS_WAIT_S,
     add_common_args,
     add_hardware_args,
+    calibration_config,
     calibration_summary,
     check_calibration_values,
     choose_calibration_file,
@@ -87,7 +92,6 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
 import pybullet as p
 
 from litegrip_pybullet import (
-    CONFIRM_KEYS,
     MAX_GRIP_FORCE_N,
     QUIT_KEYS,
     GripperSim,
@@ -109,7 +113,7 @@ NOMINAL_N_TO_NM = 0.1
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="样例 02 · 仿真控制真机：滑条设目标，按 Enter 下发",
+        description="样例 02 · 仿真控制真机：拖滑条，真机跟着走",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     add_common_args(ap)
@@ -119,10 +123,10 @@ def parse_args() -> argparse.Namespace:
                          "标定照样要先选——它决定目标角和毫米刻度")
     ap.add_argument("--force", type=float, default=10.0,
                     help=f"夹持力前馈 [N]（默认 10，上限 {MAX_GRIP_FORCE_N:g}）")
-    ap.add_argument("--duration", type=float, default=None,
-                    help=f"斜坡走多久 [s]（默认按额定手指速度 "
-                         f"{RATED_SPEED_MM_S:g} mm/s 自动算；给得比这更快会被"
-                         f"放慢，不会照做）")
+    ap.add_argument("--speed", type=float, default=100.0,
+                    help=f"位置目标的最大速率 [%%]，100%% = 手指额定 "
+                         f"{RATED_SPEED_MM_S:g} mm/s（默认 100，超过 100 按 100 "
+                         f"处理）。这就是窗口里「速度 %%」滑条的起点")
     ap.add_argument("--status", action="store_true",
                     help="只连接、只读状态并诊断故障，**不打开窗口、不下发任何运动"
                          "指令**；真机「能读不能控」时先用它看看")
@@ -132,10 +136,15 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-class StreamMove:
-    """一条流式指令：**斜坡 + 保持**两段，200 Hz 发帧。
+#: 判「滑条被拖动了」的阈值 [%]。窗口里的滑条是连续量，鼠标拖一下至少是零点几
+#: 个百分点，所以这个阈值只滤掉浮点噪声；也正因为如此，**手划过滑条就算拖动**。
+SLIDER_EPS = 0.05
 
-    ⚠️ 为什么必须斜坡，不能直接跳到目标：
+
+class SliderDrive:
+    """跟着滑条走的**限速**位置跟随器：一帧最多走 ``速度 × FRAME_DT``。
+
+    ⚠️ 为什么必须限速，不能把滑条值直接当目标发：
 
     MIT 的位置增益是标定文件里的 ``kp``：一帧要的力矩就是 ``kp × 目标与实测的
     差``。SDK 默认 kp=100 Nm/rad，一整段行程（1.845 rad）的阶跃会在第一帧要求
@@ -143,77 +152,129 @@ class StreamMove:
     欠压/过流保护并**锁死**，红灯闪烁，之后就不再执行任何指令（位置照常回报，
     所以看起来是「能读、不能控」）。本机标定现在把 kp 调到 5.0，同样的阶跃约
     9 Nm、落在额定之内，但 kp 是标定里的一项、随时可能被改回去，所以不押它：
-    斜坡限制的是**位置目标**的跳变，与 kp 取多少无关。SDK 自己的 ``goto_rad`` /
-    ``move_at_speed`` 也都是线性斜坡，这里跟它保持一致。
+    限速限制的是**位置目标每帧的增量**，与 kp 取多少无关。
 
-    两段的差别：
+    这也正是「拖动直接移动」还能安全的原因。``q_want`` 是滑条（＝你的手）指的
+    位置，``q`` 是真正被命令的位置，两者之间隔着这道限速：手拽得再快，一帧也
+    只有一个 :attr:`max_step_rad` 的增量，所以拽到底也只是让它按速度滑条限定的
+    速度走完全程，而不是跟着手跳。
 
-      斜坡   线性插值到目标，``dq`` 给速度前馈，``tau=0``（不加力）
-      保持   停在目标，``tau`` 加夹持力前馈——这就是 SDK ``set_force()`` 的做法
+    一帧的 ``(q, dq, tau)``：
 
-    力只在**保持**段才加：一边走一边顶，会在工件没夹住之前就把力顶上去。
+      ``q``    受限地朝 ``q_want`` 挪一步（挪到了就正好停在 ``q_want``）
+      ``dq``   这一步的速度，作为前馈帮电机跟上（不额外使劲）
+      ``tau``  只有**到位之后**才是夹持力前馈，运动中恒为 0——一边走一边顶，会在
+               工件还没夹住之前就把力顶上去；这和 SDK ``set_force()`` 只在停住
+               之后加力是同一个道理。
+
+    ``q`` 只在**帧真的发出去之后**才推进（:meth:`send`）：发丢的帧不能算数，
+    否则下一帧就得一次走两步，把这道限速自己绕过去。
     """
 
-    def __init__(self, start_rad: float, target_rad: float, duration_s: float,
-                 hold_s: float, kp: float, kd: float, tau_nm: float) -> None:
-        self.start_rad = start_rad
-        self.target_rad = target_rad
-        self.duration_s = max(1e-3, float(duration_s))
-        self.hold_s = max(0.0, float(hold_s))
+    def __init__(self, start_rad: float, speed_rad_s: float, kp: float,
+                 kd: float) -> None:
+        self.q = float(start_rad)         # 已经命令到的位置
+        self.q_want = float(start_rad)    # 滑条现在指的位置
+        self.speed_rad_s = max(0.0, float(speed_rad_s))
         self.kp = kp
         self.kd = kd
-        self.tau_nm = tau_nm
-        self.started = time.monotonic()
+        #: 最后一次拖动是不是**收拢**方向（见 :meth:`retarget`）。张开时加力会
+        #: 顶住电机不让它张开，所以只有收拢才允许加力。
+        self.closing = False
         self.frames = 0
-        self.dropped = 0              # send_mit_frame 返回 False 的帧数
-        self.hold_announced = False   # 「到位，开始加力」只打一次
+        self.dropped = 0                  # send_mit_frame 返回 False 的帧数
+        self.last_move = time.monotonic()  # 最后一次真的挪动的时间
 
     @property
-    def direction(self) -> float:
-        return 1.0 if self.target_rad >= self.start_rad else -1.0
+    def max_step_rad(self) -> float:
+        """一帧允许走的最大角度。**这是整个样例的安全边界。**"""
+        return self.speed_rad_s * FRAME_DT
 
-    @property
-    def speed_rad_s(self) -> float:
-        return abs(self.target_rad - self.start_rad) / self.duration_s
+    def arrived(self) -> bool:
+        """已经到滑条指的位置了吗。"""
+        return abs(self.q_want - self.q) <= 1e-12
 
-    def at(self, now: float) -> tuple[float, float, float]:
-        """返回这一帧的 ``(q, dq, tau)``——斜坡段和保持段在此分叉。"""
-        elapsed = now - self.started
-        if elapsed < self.duration_s:
-            frac = elapsed / self.duration_s
-            q = self.start_rad + (self.target_rad - self.start_rad) * frac
-            return q, self.direction * self.speed_rad_s, 0.0
-        return self.target_rad, 0.0, self.tau_nm
+    def retarget(self, q_want: float) -> None:
+        """滑条又动了：换一个新目标。
 
-    def in_hold(self, now: float) -> bool:
-        return now - self.started >= self.duration_s
+        下一次 :meth:`send` 仍然只走一个 :attr:`max_step_rad`——目标换得再远，
+        一帧的增量不变，所以「拖动」永远不会变成阶跃。
+        """
+        self.q_want = float(q_want)
+        self.closing = self.q_want > self.q
+
+    def frame(self, tau_nm: float = 0.0) -> tuple[float, float, float]:
+        """这一帧会发出去的 ``(q, dq, tau)``。**纯函数，不改状态。**"""
+        step = self.max_step_rad
+        delta = self.q_want - self.q
+        moved = delta if abs(delta) <= step else math.copysign(step, delta)
+        q = self.q + moved
+        # 到位判据用**这一帧的 q**，不是提交后的：最后一步收在 q_want 上，那一帧
+        # 就该带上夹持力，而不是等到下一帧才开始顶。
+        return q, moved / FRAME_DT, (tau_nm if abs(self.q_want - q) <= 1e-12 else 0.0)
+
+    def advance(self, now: float, tau_nm: float = 0.0) -> tuple[float, float, float]:
+        """推进一帧并提交（**不发帧**）。dry-run 用它——那里没有真机可发。
+
+        帧数照计：dry-run 报的是「本来会发出去多少帧」，和真机跑同一套节奏
+        才有得比。
+        """
+        q, dq, tau = self.frame(tau_nm)
+        self._commit(q, now)
+        self.frames += 1
+        return q, dq, tau
 
     def due(self, now: float, last_sent: float) -> bool:
         """该发下一帧了吗（按 :data:`FRAME_HZ` 限速）。"""
         return now - last_sent >= FRAME_DT
 
-    def expired(self, now: float) -> bool:
-        """这条指令的时间走完了吗。"""
-        return now >= self.started + self.duration_s + self.hold_s
+    def done(self, now: float, hold_s: float) -> bool:
+        """到位之后又 ``hold_s`` 没动过——这条驱动可以交回保活了。
 
-    def send(self, gripper, now: float) -> bool:
+        判的是「真的没动」，不是「目标没变」：还在跟随的途中，不管滑条有没有在
+        动，都不算结束。
+        """
+        return self.arrived() and (now - self.last_move) >= hold_s
+
+    def send(self, gripper, now: float, tau_nm: float = 0.0) -> bool:
         """发一帧，返回是否发出去了。
 
         ``send_mit_frame`` 在「没连接」或「没使能」时返回 ``False``。这个返回
         值以前被丢掉了，于是帧全都没发出去也照样打印「发完 N 帧」——排查
         「能读不能控」时这会把人带偏，所以它会自己数着。
         """
-        q, dq, tau = self.at(now)
-        if gripper.send_mit_frame(q=q, kp=self.kp, kd=self.kd, dq=dq, tau=tau):
-            self.frames += 1
-            return True
-        self.dropped += 1
-        return False
+        q, dq, tau = self.frame(tau_nm)
+        if not gripper.send_mit_frame(q=q, kp=self.kp, kd=self.kd, dq=dq, tau=tau):
+            self.dropped += 1
+            return False
+        self._commit(q, now)
+        self.frames += 1
+        return True
+
+    def _commit(self, q: float, now: float) -> None:
+        if q != self.q:
+            self.q = q
+            self.last_move = now
 
 
-#: 手指额定速度 [SDK 刻度 mm/s]。斜坡至少要慢到这个速度，和 SDK 的
-#: ``move_at_speed`` 同一把尺子，也让真机走的速度和窗口里预览的速度一致。
+#: 手指额定速度 [SDK 刻度 mm/s]。限速的上限就是它，和 SDK 的 ``move_at_speed``
+#: 同一把尺子。
 RATED_SPEED_MM_S = 85.0
+
+
+def plan_speed(gripper, percent: float) -> float:
+    """「速度 %」→ 位置目标的最大角速度 [rad/s]。
+
+    100% 就是额定手指速度 :data:`RATED_SPEED_MM_S`。超过 100% 不照做——按 100%
+    处理并说明；那是会拉保护的用法，而且窗口里也没有更快的东西可比。
+    """
+    pct = float(percent)
+    if pct > 100.0:
+        print(f"   ⚠️ 速度 {pct:.0f}% 超过额定，已按 100%"
+              f"（{RATED_SPEED_MM_S:g} mm/s）处理")
+        pct = 100.0
+    rad_to_mm = gripper.config.rad_to_mm or 105.26
+    return RATED_SPEED_MM_S * max(0.0, pct) / 100.0 / rad_to_mm
 
 #: 实测：**使能态**的电机静默约这么久就闩锁 0xD 通信丢失故障（SDK 在真机上量到的）。
 #:
@@ -232,24 +293,6 @@ IDLE_HZ = FRAME_HZ
 
 #: 保持段的默认时长 [s]：到位后加力顶住的时间。
 DEFAULT_HOLD_S = 0.5
-
-
-def plan_duration(gripper, distance_rad: float, requested: float | None) -> float:
-    """算斜坡时长：慢到手指速度不超过额定值。
-
-    ``--duration`` 比额定速度要求的时间还短时不会照做——那正是会烧保护的用法
-    ——而是放慢到额定速度并说明原因。``None`` 表示「按额定速度自动算」。
-    """
-    rad_to_mm = gripper.config.rad_to_mm or 105.26
-    min_s = abs(distance_rad) * rad_to_mm / RATED_SPEED_MM_S
-    if requested is None or requested <= 0.0:
-        return min_s
-    if requested < min_s:
-        print(f"   ⚠️ --duration {requested:.2f} s 对应手指速度 "
-              f"{abs(distance_rad) * rad_to_mm / requested:.0f} mm/s，"
-              f"超过额定 {RATED_SPEED_MM_S:.0f} mm/s；已放慢到 {min_s:.2f} s")
-        return min_s
-    return max(requested, min_s)
 
 
 #: 没装 SDK（或者 SDK 比这颗错误码还老）时的兜底表，内容抄自
@@ -355,15 +398,30 @@ class IdleKeeper:
     def __init__(self, gripper, hz: float = IDLE_HZ) -> None:
         self.gripper = gripper
         self.frame = hold_frame(gripper, request=True)   # None = 还没读到可信位置
+        #: 记住的这一帧是不是收拢指令——只有收拢才允许带夹持力（见
+        #: :meth:`SliderDrive.retarget`）。锁位帧不含运动，所以是 False。
+        self.closing = False
         self.interval = 1.0 / hz
         self.last_sent = float("-inf")
         self.frames = 0
         self.dropped = 0
         self.starved = 0                      # 因为读不到位置而没发帧的次数
 
-    def remember(self, move: "StreamMove") -> None:
-        """记住这条指令的最后一帧，之后接着按它发。"""
-        self.frame = (move.target_rad, move.kp, move.kd, 0.0, move.tau_nm)
+    def remember(self, drive: "SliderDrive") -> None:
+        """记住这条驱动停住的位置，之后接着按它发。
+
+        前馈力矩不写进这一帧：它跟着「夹持力」滑条走（见 :meth:`set_force`），
+        所以夹住工件之后再拖力滑条，力道会跟着变，而不是停在拖动那一刻的值。
+        """
+        self.frame = (drive.q, drive.kp, drive.kd, 0.0, 0.0)
+        self.closing = drive.closing
+
+    def set_force(self, tau_nm: float) -> None:
+        """更新保活帧的前馈力矩 [Nm]。0 = 这一帧只是锁位。"""
+        if self.frame is None:
+            return
+        q, kp, kd, dq, _ = self.frame
+        self.frame = (q, kp, kd, dq, max(0.0, float(tau_nm)))
 
     def maybe_send(self, now: float) -> bool | None:
         """到点就发一帧。
@@ -391,28 +449,36 @@ class IdleKeeper:
         return False
 
 
-def make_sliders(gripper, default_force_n: float) -> tuple[int, int]:
-    """建两个滑条：目标开度 % / 夹持力 N。返回 ``(开度 id, 力 id)``。
+def make_sliders(gripper, *, live: bool, default_force_n: float,
+                 default_speed_pct: float) -> tuple[int, int, int, float]:
+    """建三个滑条：目标开度 % / 速度 % / 夹持力 N。
 
-    开度滑条从真机当前开度起步，这样一上来不会因为滑条值≠真机位置而「跳」。
+    返回 ``(开度 id, 速度 id, 力 id, 起始开度)``。
+
+    开度滑条从真机**当前**开度起步：判「你在拖滑条」看的是滑条值**变没变**，起点
+    对不上真机就会在启动那一帧被当成一次拖动。所以起点要么是真机实测的，要么是
+    一个明确说明过的名义值——**但无论哪个都不会让电机动**：拖动检测只认变化，
+    静止的滑条值永远不会下发。
     """
-    start_pct = 100.0
-    if gripper is not None:
+    start_fraction = 1.0
+    if live:
         state = fresh_state(gripper, request=True)   # 刚使能，先把它叫醒再读
         if state is None:
-            # 读不到就别假装知道：起点留 100%，并说清楚它不是真机现在的开度
-            # （滑条值本身不会下发，按 Enter 才发，所以只是预览不准）。
             print(f"   ⚠️ 读不到真机状态帧（等了 {FRESH_WAIT_S * 1000:.0f} ms）："
-                  "滑条起点只能用 100%，不代表真机现在的开度")
+                  "开度滑条起点只能用 100%，不代表真机现在的开度"
+                  "（起点只是为了让「拖动」有个基准，不会下发）")
         else:
-            start_pct = rad_to_fraction(gripper, state.position_rad) * 100.0
-    target_id = p.addUserDebugParameter("目标开度 %", 0.0, 100.0, start_pct)
+            start_fraction = rad_to_fraction(gripper, state.position_rad)
+    target_id = p.addUserDebugParameter("目标开度 %", 0.0, 100.0,
+                                        start_fraction * 100.0)
+    speed_id = p.addUserDebugParameter("速度 %", 0.0, 100.0,
+                                       min(default_speed_pct, 100.0))
     force_id = p.addUserDebugParameter("夹持力 N", 0.0, MAX_GRIP_FORCE_N,
                                        min(default_force_n, MAX_GRIP_FORCE_N))
-    return target_id, force_id
+    return target_id, speed_id, force_id, start_fraction
 
 
-def read_real(gripper) -> tuple[float, float, bool, str | None] | None:
+def read_real(gripper, *, live: bool) -> tuple[float, float, bool, str | None] | None:
     """读一帧真机状态，返回 ``(开度, 夹持力 N, 是否在动, 故障)``，无真机返回 None。
 
     ``get_state(wait=False)`` 只做一次非阻塞 poll 再读缓存，不阻塞主循环。
@@ -421,7 +487,7 @@ def read_real(gripper) -> tuple[float, float, bool, str | None] | None:
     故障描述一起带出来，是因为**锁死的故障在状态帧上是看不出来的**：位置照常
     更新、``is_moving`` 照常为假，只有错误码变了。不盯着它就会一直发帧。
     """
-    if gripper is None:
+    if not live:
         return None
     state = gripper.get_state(wait=False)
     return (
@@ -607,12 +673,16 @@ def main() -> int:
         )
         print(f"   标定 {calib_path}")
         print(f"        {calibration_summary(calib)}")
-        gripper = None
+        # 没有真机，但要算目标角／把角度换回开度，就得有一个 ``.config``——
+        # 用刚校验过的那份标定装一个，字段名和 SDK 的 ``gripper.config`` 一致。
+        gripper = SimpleNamespace(config=calibration_config(calib))
+        live = False
         n_to_nm = NOMINAL_N_TO_NM
     else:
         print(SAFETY_BANNER)
         print("\n样例 02 · 仿真控制真机")
         gripper = open_real_gripper(args)
+        live = True
         n_to_nm = import_litegrip().UnitConversion.N_TO_NM
 
     # ⚠️ 从这里起全部在 try 里：真机一旦使能（上面 open_real_gripper 干的事），
@@ -621,32 +691,41 @@ def main() -> int:
     # 进程已经死了，连是哪一步炸的都看不到。窗口建得慢、滑条建不出来，都算在这里面。
     sim = None
     keeper: IdleKeeper | None = None
-    move: StreamMove | None = None
+    drive: SliderDrive | None = None
     last_sent = 0.0
     last_print = 0.0
-    sent_count = 0
+    last_target_pct: float | None = None   # None = 还没读到过滑条，第一帧只对齐基准
+    drags = 0          # 拖动次数 = 建过几条驱动
     faulted = False    # 真机报故障：停发、不再对着不听话的电机发帧
+    #: dry-run 下的「当前位置」：没有真机可读，就用上一条驱动停住的位置接上。
+    dry_rad = 0.0
 
     try:
         # 一定是开窗的：上面已经拦掉了 --headless，滑条只有 GUI 连接才有
         # （DIRECT 连接里 addUserDebugParameter 会返回 -1）。
         sim = GripperSim(urdf_path=args.urdf, gui=True, max_force_n=force_n)
         sim.focus_camera()
-        target_id, force_id = make_sliders(gripper, force_n)
-        if target_id < 0 or force_id < 0:
+        max_speed_rad_s = plan_speed(gripper, args.speed)
+        target_id, speed_id, force_id, start_fraction = make_sliders(
+            gripper, live=live, default_force_n=force_n,
+            default_speed_pct=args.speed)
+        if min(target_id, speed_id, force_id) < 0:
             raise SystemExit(
                 "❌ 建不出滑条（PyBullet 的 addUserDebugParameter 只在 GUI 连接下"
                 "可用）。\n   检查是否真的有可用显示，或改用 "
                 "examples/01_sim_only.py。"
             )
+        dry_rad = fraction_to_target_rad(gripper, start_fraction)
 
         print(f"   仿真：{sim.urdf_path}")
-        speed_note = (f"{args.duration:g} s" if args.duration
-                      else f"自动（≤{RATED_SPEED_MM_S:g} mm/s）")
-        print(f"   拖滑条改目标 → 按 Enter/空格 下发（斜坡 {speed_note} + "
-              f"保持 {DEFAULT_HOLD_S:g} s，{FRAME_HZ:g} Hz 发帧）→ Esc/Q 退出")
-        if gripper is None:
-            print("   （dry-run：按 Enter 只打印，不会真的下发）")
+        print(f"   拖动「目标开度」→ 真机跟着走（限速 {args.speed:g}%，"
+              f"≤{args.speed / 100.0 * RATED_SPEED_MM_S:g} mm/s；"
+              f"「速度 %」滑条随时可调）→ Esc/Q 退出")
+        print(f"   位置目标每帧最多走 {max_speed_rad_s * FRAME_DT:.6f} rad"
+              f"（= 速度 × {FRAME_DT * 1000:g} ms），{FRAME_HZ:g} Hz 发帧——"
+              "拖得再快也不会变成一条阶跃指令")
+        if not live:
+            print("   （dry-run：不连真机、不发任何帧，窗口里走的是命令值）")
         else:
             # 使能之后**立刻**喂一帧锁在当前位置，不等主循环第一圈。SDK 的
             # `enable()` 现在会自己抱在实测位置（`_enable_and_hold`：使能帧 →
@@ -665,91 +744,120 @@ def main() -> int:
                 break
 
             now = time.monotonic()
-            target_fraction = p.readUserDebugParameter(target_id) / 100.0
+            target_pct = p.readUserDebugParameter(target_id)
+            speed_pct = p.readUserDebugParameter(speed_id)
             grip_n = p.readUserDebugParameter(force_id)
 
-            # 仿真手指跟着滑条走 —— 这就是「预览」，而且它自己就受 85 mm/s
-            # 的速度限制，所以看到的速度就是真机将要走的速度。
-            sim.command_fraction(target_fraction)
+            real = read_real(gripper, live=live)
+            if real is None:
+                real_fraction, real_force_n, real_moving, fault = 0.0, 0.0, False, None
+            else:
+                real_fraction, real_force_n, real_moving, fault = real
+                if fault and not faulted:
+                    # 进了故障态：立刻停发，别再对着不听话的电机发帧了。
+                    # 窗口留着不关，好让人把上面这些字读完。
+                    print(f"\n❌ 真机报故障：{fault}")
+                    print("   已停止发帧。清故障（不动电机）："
+                          "examples/02_sim_to_real.py --status --clear-fault")
+                    drive = None
+                    faulted = True
 
-            if pressed(events, CONFIRM_KEYS) and move is None:
-                sent_count += 1
-                if gripper is None:
-                    duration_s = args.duration or 1.0   # dry-run：跑得快些看流程
-                    print(f"\n[dry-run #{sent_count}] 会下发："
-                          f"开度 {target_fraction * 100:.1f}% · "
-                          f"夹持力 {grip_n:.1f} N · 斜坡 {duration_s:g} s + "
-                          f"保持 {DEFAULT_HOLD_S:g} s")
-                else:
-                    # ⚠️ 这里**必须**拿到新鲜的位置：斜坡的起点、方向和时长全按它
-                    # 算。用缓存里的旧值（或从没读到过时的 0.0），起点就落在别处、
-                    # 时长还能算成 ~0——合起来就是一条阶跃指令，正是「一开夹爪就
-                    # 起飞」的形态。所以拿不到就拒绝下发，别猜。
-                    state = fresh_state(gripper, request=True)
-                    if state is None:
-                        print(f"\n❌ 读不到真机的状态帧（先请它回了一帧，又等了 "
-                              f"{FRESH_WAIT_S * 1000:.0f} ms），**不下发**：")
-                        print("   斜坡的起点和时长都要按「现在」的位置算，拿旧读数"
-                              "算出来的是一条阶跃指令，电机接不住。")
-                        print("   先看真机怎么了："
-                              "python3 examples/02_sim_to_real.py --status")
-                        continue
-                    fault = fault_of(state)
-                    if fault:
-                        # 锁死的故障下，发什么都白搭，还会掩盖真正的原因
-                        move = None
-                        faulted = True
-                        print(f"\n❌ 真机报故障：{fault}")
-                        print("   故障是锁死的：位置照读，但电机不执行任何指令。"
-                              "请先清故障再下发：")
-                        print("   python3 examples/02_sim_to_real.py --status "
-                              "--clear-fault")
-                        continue
-                    target_rad = fraction_to_target_rad(gripper, target_fraction)
-                    # 前馈力矩是恒定推的，不分方向：张开时加力会顶住电机不让
-                    # 它张开，所以只在**收拢**方向加——收拢时加力才是「夹紧」。
-                    closing = target_rad > state.position_rad
-                    tau_nm = grip_n * n_to_nm if closing else 0.0
-                    duration_s = plan_duration(
-                        gripper, target_rad - state.position_rad, args.duration)
-                    move = StreamMove(
-                        start_rad=state.position_rad, target_rad=target_rad,
-                        duration_s=duration_s, hold_s=DEFAULT_HOLD_S,
-                        kp=gripper.config.kp, kd=gripper.config.kd, tau_nm=tau_nm)
+            # 第一帧只对齐基准：滑条值没变过就不算「拖动了」。
+            if last_target_pct is None:
+                last_target_pct = target_pct
+            dragged = abs(target_pct - last_target_pct) > SLIDER_EPS
+
+            # ⚠️ 顺序是先拖动再发帧：拖动改的是**目标**，这一帧的位置目标仍然只
+            # 走一个 max_step，所以「拖到哪」和「这一帧走到哪」是两件事。
+            if dragged:
+                last_target_pct = target_pct
+            if dragged and not faulted:
+                target_rad = fraction_to_target_rad(gripper, target_pct / 100.0)
+                if drive is None:
+                    # 每条驱动都要有实测的起点：拖动之前发的保活帧只是「锁在
+                    # 电机说的位置」，还没有一条指令。拿旧读数当起点，限速本身就
+                    # 没有意义了——一步就是从错的地方走到目标。所以拿不到就拒绝，
+                    # 别猜。
+                    start_rad = None
+                    if live:
+                        state = fresh_state(gripper, request=True)
+                        if state is None:
+                            print(f"\n❌ 读不到真机的状态帧（先请它回了一帧，又等了 "
+                                  f"{FRESH_WAIT_S * 1000:.0f} ms），**不下发**：")
+                            print("   限速要按「现在」的位置算，拿旧读数算出来的"
+                                  "是一条阶跃指令，电机接不住。")
+                            print("   先看真机怎么了："
+                                  "python3 examples/02_sim_to_real.py --status")
+                            continue
+                        fault = fault_of(state)
+                        if fault:
+                            # 锁死的故障下，发什么都白搭，还会掩盖真正的原因
+                            drive = None
+                            faulted = True
+                            print(f"\n❌ 真机报故障：{fault}")
+                            print("   故障是锁死的：位置照读，但电机不执行任何指令。"
+                                  "请先清故障再下发：")
+                            print("   python3 examples/02_sim_to_real.py --status "
+                                  "--clear-fault")
+                            continue
+                        start_rad = state.position_rad
+                        travel_mm = abs(target_rad - start_rad) \
+                            * gripper.config.rad_to_mm
+                        print(f"\n[拖动 #{drags + 1}] 开度 {target_pct:.1f}% · "
+                              f"从实测 {start_rad:+.4f} rad 起步 · "
+                              f"路程 {travel_mm:.1f} mm · "
+                              f"限速 {speed_pct:.0f}% "
+                              f"（{speed_pct / 100.0 * RATED_SPEED_MM_S:.0f} mm/s）")
+                    else:
+                        # dry-run：没有真机可读，接着上一条驱动停住的位置走。
+                        start_rad = dry_rad
+                        print(f"\n[拖动 #{drags + 1}] 开度 {target_pct:.1f}% · "
+                              f"（dry-run：起点用命令值 {start_rad:+.4f} rad）")
+                    drive = SliderDrive(
+                        start_rad=start_rad, speed_rad_s=plan_speed(gripper, speed_pct),
+                        kp=gripper.config.kp, kd=gripper.config.kd)
+                    drags += 1
                     last_sent = 0.0
-                    travel_mm = abs(target_rad - state.position_rad) \
-                        * gripper.config.rad_to_mm
-                    print(f"\n[下发 #{sent_count}] 开度 {target_fraction * 100:.1f}%"
-                          f" → {target_rad:+.4f} rad · "
-                          f"{'收拢' if closing else '张开'} · "
-                          f"走 {travel_mm:.1f} mm / {duration_s:.2f} s "
-                          f"（{travel_mm / duration_s:.0f} mm/s）· "
-                          f"前馈 {tau_nm:.3f} Nm")
+                drive.retarget(target_rad)
+                # 「速度 %」随时可调：它改的是**位置目标每帧的增量**，不是这一条
+                # 驱动开跑时的速度。
+                drive.speed_rad_s = plan_speed(gripper, speed_pct)
 
-            if move is not None:
-                if move.due(now, last_sent):
+            if faulted:
+                pass                       # 故障态一帧都不发：发了也不执行
+            elif drive is not None:
+                # 前馈力矩是恒定推的，不分方向：张开时加力会顶住电机不让它张开，
+                # 所以只在**收拢**方向加——收拢时加力才是「夹紧」。而且只有到位
+                # 之后才加（SliderDrive.frame 里判的）。
+                tau_nm = grip_n * n_to_nm if drive.closing else 0.0
+                if drive.due(now, last_sent):
                     last_sent = now
-                    if not move.send(gripper, now):
+                    if live:
+                        sent = drive.send(gripper, now, tau_nm)
+                    else:
+                        drive.advance(now, tau_nm)     # dry-run：推进，不发帧
+                        sent = True
+                    if not sent and drive.dropped == 1:
                         # send_mit_frame 返回 False = 没使能 / 没连接。旧版这里
                         # 直接吞掉了，于是「一条帧都没发出去」也报「发完 N 帧」。
-                        if move.dropped == 1:
-                            print("   ⚠️ 帧没发出去（send_mit_frame 返回 False）："
-                                  "真机可能未使能或已断开")
-                if move.in_hold(now) and not move.hold_announced:
-                    move.hold_announced = True
-                    print(f"   到位，开始加力顶住 {move.tau_nm:.3f} Nm")
-                if move.expired(now):
-                    print(f"   [#{sent_count}] "
-                          f"{'发完' if not move.dropped else '只发出'} "
-                          f"{move.frames} 帧"
-                          + (f"（丢 {move.dropped} 帧）" if move.dropped else ""))
-                    # 空闲保活接着按这条指令的最后一帧发：夹持力不会因为
-                    # 「空闲」而松掉，电机也不会因为收不到帧而锁超时故障。
-                    keeper.remember(move)
-                    move = None
-            elif keeper is not None and not faulted:
+                        print("   ⚠️ 帧没发出去（send_mit_frame 返回 False）："
+                              "真机可能未使能或已断开")
+                if drive.done(now, DEFAULT_HOLD_S):
+                    print(f"   [#{drags}] 停住 {DEFAULT_HOLD_S:g} s，"
+                          f"{'发出' if live else '（dry-run）模拟'} "
+                          f"{drive.frames} 帧"
+                          + (f"（丢 {drive.dropped} 帧）" if drive.dropped else "")
+                          + "，接着按这个位置保活")
+                    # 交回保活：夹持力不会因为「停住」而松掉，电机也不会因为
+                    # 收不到帧而锁超时故障。下一次拖动会重新读一次实测位置。
+                    if keeper is not None:
+                        keeper.remember(drive)
+                    dry_rad = drive.q
+                    drive = None
+            elif keeper is not None:
                 # 空闲保活。见 :class:`IdleKeeper`：停发 = 等电机的通信超时
                 # 保护把真机锁成故障态。
+                keeper.set_force(grip_n * n_to_nm if keeper.closing else 0.0)
                 sent = keeper.maybe_send(now)
                 if sent is False and keeper.dropped == 1:
                     print("   ⚠️ 空闲保活帧没发出去（send_mit_frame 返回 "
@@ -761,44 +869,47 @@ def main() -> int:
                           f"{keeper.starved} 次）：目标得按实测位置算，拿不到就不发。"
                           f"\n      查 CAN 连接和供电，或先跑 --status 看真机状态。")
 
-            real = read_real(gripper)
-            if real is None:
-                sim.status_text(f"命令 {target_fraction * 100:5.1f}%  （dry-run）")
-            else:
-                real_fraction, real_force_n, real_moving, fault = real
-                if fault and not faulted:
-                    # 进了故障态：立刻停发，别再对着不听话的电机发帧了。
-                    # 窗口留着不关，好让人把上面这些字读完。
-                    print(f"\n❌ 真机报故障：{fault}")
-                    print("   已停止发帧。清故障（不动电机）："
-                          "examples/02_sim_to_real.py --status --clear-fault")
-                    move = None
-                    faulted = True
+            # 窗口显示的是**真机在哪**（dry-run 下是命令值）。用 reset_fraction 而
+            # 不是 command_fraction：前者是运动学瞬移，只把模型摆到那个位置，不驱
+            # 动任何东西——这不是「仿真控制真机」的那条路径，是镜像。
+            shown_rad = drive.q if drive is not None else dry_rad
+            sim.reset_fraction(
+                real_fraction if live else rad_to_fraction(gripper, shown_rad))
 
-                if move is not None:
-                    phase = "加力中" if move.in_hold(now) else "斜坡中"
-                elif faulted:
-                    phase = "故障"
-                elif real_moving:
-                    phase = "锁位·真机在动"
-                else:
-                    phase = "锁位中"
+            if faulted:
+                phase = "故障"
+            elif drive is not None and not drive.arrived():
+                phase = f"跟随中 → {target_pct:.0f}%"
+            elif drive is not None and drive.closing and grip_n > 0.0:
+                phase = f"到位·加力 {grip_n:g} N"
+            elif drive is not None:
+                phase = "到位"
+            elif not live:
+                phase = "空闲"
+            elif real_moving:
+                phase = "锁位·真机在动"
+            else:
+                phase = "锁位"
+            commanded = rad_to_fraction(gripper, shown_rad) * 100
+            if live:
                 sim.status_text(
-                    f"命令 {target_fraction * 100:5.1f}%   "
                     f"真机 {real_fraction * 100:5.1f}%   "
+                    f"命令 {commanded:5.1f}%   "
                     f"力 {real_force_n:5.2f} N   {phase}"
                 )
-                if now - last_print >= PRINT_DT:
-                    last_print = now
-                    print("  " + real_line(real_fraction, real_force_n,
-                                           real_moving))
+            else:
+                sim.status_text(f"命令 {commanded:5.1f}%   （dry-run：没有真机）   "
+                                f"{phase}")
+            if live and now - last_print >= PRINT_DT:
+                last_print = now
+                print("  " + real_line(real_fraction, real_force_n, real_moving))
 
             if not sim.step():
                 break
     except KeyboardInterrupt:
         print("\n收到 Ctrl-C")
     finally:
-        if gripper is not None:
+        if live:
             # 退出时**明确失能**（0xFD），而不是只停发帧：
             #   · stop() 只发一帧 kp=0，电机还是「使能 + 没人喂帧」——实测这种
             #     状态静默约 0.9 s 就锁 0xD 通信丢失故障，而进程一退就没人能清它；
@@ -814,8 +925,9 @@ def main() -> int:
 
     if faulted:
         return 1
-    if sent_count == 0:
-        print("\n一条指令都没下发过：滑条调好后要按 Enter 才下发。")
+    if drags == 0:
+        print("\n一条指令都没下发过：拖动「目标开度」滑条真机才会动，"
+              "启动之后它一直锁在当前位置。")
     print("完成。反向的（真机 → 仿真）见 examples/03_real_to_sim.py")
     return 0
 

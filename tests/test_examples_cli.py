@@ -216,9 +216,12 @@ class TestExample02Status:
         text = output_of(result)
         assert "--dry-run" in text
 
-    def test_a_future_duration_is_announced_as_a_rate_limit(self):
-        """``--duration`` is a floor on speed, not a promise to go faster."""
-        assert "mm/s" in run(EXAMPLE_02, "--help").stdout
+    def test_the_speed_slider_is_announced_as_a_rate_limit(self):
+        """``--speed`` is a cap on the position target, not a promise to arrive
+        sooner, so the help has to say what 100 % *is* — millimetres per second."""
+        stdout = run(EXAMPLE_02, "--help").stdout
+        assert "--speed" in stdout
+        assert "mm/s" in stdout
 
 
 class TestChoosingCalibrationIsMandatory:
@@ -391,11 +394,14 @@ class TestSdkWithoutTheRequiredApi:
         )
         return {"LITEGRIP_SDK_DIR": str(tmp_path)}
 
-    @pytest.mark.parametrize("script", [EXAMPLE_02, EXAMPLE_03],
-                             ids=lambda p: p.name)
-    def test_it_stops_before_connecting(self, script, bare_sdk):
-        result = run(script, "--channel", NOWHERE, "--duration", "1",
-                     env=bare_sdk)
+    @pytest.mark.parametrize("script, args", [
+        # 02 drives by drag now: its speed is a percentage, and no run-length
+        # option is needed to reach the CAN interface and fail there.
+        (EXAMPLE_02, ()),
+        (EXAMPLE_03, ("--duration", "1")),
+    ], ids=["02_sim_to_real.py", "03_real_to_sim.py"])
+    def test_it_stops_before_connecting(self, script, args, bare_sdk):
+        result = run(script, "--channel", NOWHERE, *args, env=bare_sdk)
         assert result.returncode == 1, output_of(result)
         text = output_of(result)
         assert "缺少本仓库必须的公开接口" in text
