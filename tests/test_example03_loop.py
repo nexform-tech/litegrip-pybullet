@@ -203,14 +203,24 @@ def _run(monkeypatch, gripper=None, steps=60, keys_at=None, on_tick=None,
         duration=0.0,
     )
 
+    # ``open_real_gripper`` is where the motor would be enabled; the fake records
+    # how it was asked, so a mode that must not enable can be told apart from one
+    # that must.
+    opened: list[dict] = []
+
+    def fake_open(a, enable=True):
+        opened.append(dict(enable=enable))
+        return gripper
+
     monkeypatch.setattr(ex03, "parse_args", lambda: args)
-    monkeypatch.setattr(ex03, "open_real_gripper", lambda a: gripper)
+    monkeypatch.setattr(ex03, "open_real_gripper", fake_open)
     monkeypatch.setattr(ex03, "GripperSim", lambda **kw: sim)
     monkeypatch.setattr(ex03, "time", SimpleNamespace(
         monotonic=clock.monotonic, sleep=lambda s: None))
 
     code = ex03.main()
-    return SimpleNamespace(code=code, sim=sim, gripper=gripper, clock=clock)
+    return SimpleNamespace(code=code, sim=sim, gripper=gripper, clock=clock,
+                           opened=opened)
 
 
 def fraction_of(rad: float) -> float:
@@ -241,6 +251,20 @@ class TestMirroring:
             "--passive 说好了一帧都不发，0xCC 请求也是 CAN 帧"
         assert not run.gripper.disabled, \
             "--passive 下一帧都没发过，退出时也不该补一帧 0xFD 失能"
+
+    def test_passive_does_not_enable_the_motor(self, monkeypatch):
+        """Enabling and then sending nothing is what latches 0xD: about a second
+        later the motor reports communication loss. ``--passive`` is "watch
+        someone else drive it", so it must not enable either."""
+        run = _run(monkeypatch, passive=True, steps=40)
+        assert run.opened == [dict(enable=False)], \
+            "--passive 还是把电机使能了——使能了又没人喂帧，约 1 s 就锁 0xD"
+
+    def test_the_default_mode_does_enable(self, monkeypatch):
+        """The mirror mode holds the fingers with stiffness, which needs the
+        motor enabled."""
+        run = _run(monkeypatch, steps=40)
+        assert run.opened == [dict(enable=True)]
 
 
 class TestExiting:
