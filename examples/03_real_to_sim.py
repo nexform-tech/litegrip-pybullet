@@ -25,7 +25,8 @@
 
 按键：
   Z         真机失力（可用手推）/ 恢复使能
-  Esc / Q   退出（退出前会恢复使能，让真机自己保持住位置）
+  Esc / Q   退出（退出前会**失能**：手指会松、夹着的工件会掉，但不会在电机上
+            留下通信超时故障——使能态静默约 0.9 s 就锁 0xD）
 
 ⚠️ ``--zero-gravity`` 时真机是**软**的：手指可以被推动，也会因为重力或外力
 自己滑动。托住夹爪再看，别让它在行程中间突然松掉。
@@ -258,9 +259,14 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n收到 Ctrl-C")
     finally:
-        if zero_gravity:
-            gripper.exit_zero_gravity()  # 别把真机留在「软」的状态下
-            print("[真机] 已恢复使能")
+        if not args.passive:
+            # 退出前**失能**（0xFD），而不是只发一帧 exit_zero_gravity() 就走：
+            # 那一帧之后没人再喂，使能态的电机静默约 0.9 s 就锁 0xD。失能则不需要
+            # 任何帧，也就没有故障可闩。
+            # 代价和 --zero-gravity 退出时一样：手指变软、可能因自重滑动。
+            gripper.disable()
+            print("[真机] 已失能（0xFD）：手指会松、可能因自重滑动；"
+                  "不会在电机上留下通信超时故障")
         gripper.disconnect()
         sim.disconnect()
         print("[真机] 已断开")

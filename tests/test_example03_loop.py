@@ -88,6 +88,7 @@ class FakeGripper:
         self.frames: list[dict] = []
         self.refreshes: list[float] = []
         self.zero_gravity_calls: list[str] = []
+        self.disabled = False
         self.disconnected = False
         self.config = SimpleNamespace(
             pos_closed_rad=POS_CLOSED_RAD,
@@ -133,6 +134,9 @@ class FakeGripper:
 
     def exit_zero_gravity(self) -> None:
         self.zero_gravity_calls.append("exit")
+
+    def disable(self) -> None:
+        self.disabled = True
 
     def disconnect(self) -> None:
         self.disconnected = True
@@ -235,6 +239,30 @@ class TestMirroring:
         assert run.gripper.frames == []
         assert run.gripper.refreshes == [], \
             "--passive 说好了一帧都不发，0xCC 请求也是 CAN 帧"
+        assert not run.gripper.disabled, \
+            "--passive 下一帧都没发过，退出时也不该补一帧 0xFD 失能"
+
+
+class TestExiting:
+    """Leaving the motor enabled and silent is what latches 0xD.
+
+    ``exit_zero_gravity()`` is a single frame, so the old exit path left an
+    enabled motor with nobody feeding it: about a second later it latched the
+    communication-loss fault, and the process that could have cleared it was
+    already gone.
+    """
+
+    def test_the_exit_disables_the_motor(self, monkeypatch):
+        run = _run(monkeypatch, steps=40)
+        assert run.gripper.disabled, "退出时没有失能——电机会在无人喂帧时锁故障"
+
+    def test_it_disables_even_when_it_was_left_soft(self, monkeypatch):
+        """Coming out of --zero-gravity, one relock frame is not enough: nothing
+        follows it, so the enabled motor goes quiet and latches a fault."""
+        run = _run(monkeypatch, zero_gravity=True, steps=40)
+        assert run.gripper.disabled
+        assert run.gripper.zero_gravity_calls == ["enter"], \
+            "退出时又发了一帧 exit_zero_gravity——那一帧之后还是没人喂"
 
 
 class TestItWillNotCommandAnUnmeasuredPosition:

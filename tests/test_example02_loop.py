@@ -96,6 +96,7 @@ class FakeGripper:
         self.answering = answering
         self.frames: list[dict] = []
         self.stopped = False
+        self.disabled = False
         self.refreshes: list[float] = []
         self.disconnected = False
         self.config = SimpleNamespace(
@@ -140,7 +141,11 @@ class FakeGripper:
         return True
 
     def stop(self) -> None:
+        """Zero-torque but still *enabled* — the exit path must not use this."""
         self.stopped = True
+
+    def disable(self) -> None:
+        self.disabled = True
 
     def disconnect(self) -> None:
         self.disconnected = True
@@ -397,8 +402,21 @@ class TestFaultHandling:
 
     def test_it_disconnects_even_when_nothing_was_sent(self, monkeypatch):
         run = _run(monkeypatch, steps=20)
-        assert run.gripper.stopped and run.gripper.disconnected
+        assert run.gripper.disconnected
         assert run.sim.disconnected
+
+    def test_the_exit_disables_rather_than_leaving_the_motor_enabled(self, monkeypatch):
+        """Stopping the frames is not enough.
+
+        ``stop()`` sends one kp=0 frame and leaves the motor *enabled*; an
+        enabled motor that hears nothing latches 0xD within about a second, and
+        a process that has exited cannot clear it — the next run then starts
+        looking at a wedged gripper.  ``disable()`` needs no frames at all.
+        """
+        run = _run(monkeypatch, steps=20)
+        assert run.gripper.disabled, "退出时没有失能——电机会在无人喂帧时锁故障"
+        assert not run.gripper.stopped, \
+            "用了 stop()：它只发一帧零力矩，电机仍是使能态"
 
 
 class TestStatusReportsMeasuredValues:
@@ -527,7 +545,8 @@ class TestItNeverLeavesTheMotorUnfed:
 
         with pytest.raises(RuntimeError):
             ex02.main()
-        assert gripper.stopped, "建窗口失败后没有停发帧"
+        assert gripper.disabled, "建窗口失败后没让电机失能"
+        assert not gripper.stopped, "只停发帧：电机还是「使能 + 没人喂帧」"
         assert gripper.disconnected, "建窗口失败后没有断开真机——电机会被晾着"
 
 
