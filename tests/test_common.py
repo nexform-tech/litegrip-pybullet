@@ -7,6 +7,7 @@ arithmetic the SDK's own ``goto(mm)`` does.
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -140,6 +141,306 @@ class TestCheckCalibration:
         message = str(excinfo.value)
         assert "--calib" in message
         assert "calibrate()" in message
+
+    def test_the_value_level_check_agrees_with_the_config_one(self):
+        """``--dry-run`` has no ``GripperConfig`` to look at, only a file."""
+        _common.check_calibration_values(0.114, -1.731, 65.21, 120.0)
+        for values in ((0.0, 1.14, 105.26, 120.0),     # factory: inverted travel
+                       (0.114, 0.114, 65.21, 120.0),   # no travel at all
+                       (0.114, -1.731, 0.0, 120.0),    # no mm scale
+                       (0.114, -1.731, 65.21, 0.0)):   # no stroke
+            with pytest.raises(SystemExit, match="标定"):
+                _common.check_calibration_values(*values)
+
+
+#: A plausible calibration file's contents.  Not this bench's numbers -- the
+#: tests below are about which file gets *used*, not about the arithmetic.
+CALIB = dict(
+    channel="can0", can_id=0x08, mst_id=0x18,
+    zero_position_rad=0.114, max_position_rad=-1.731,
+    travel_range_rad=1.845, rad_to_mm=120.0 / 1.845, kp=5.0, kd=2.0,
+)
+
+
+def _calib_file(path: Path, **overrides) -> Path:
+    """Write a calibration file and return its path."""
+    data = dict(CALIB)
+    data.update(overrides)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def _interactive(monkeypatch, on: bool) -> None:
+    """Make ``_common`` see (or not see) an interactive stdin.
+
+    ``_common``'s own ``sys`` reference is replaced, not the real module's, so
+    pytest's own stdin keeps working.
+    """
+    monkeypatch.setattr(_common, "sys", SimpleNamespace(
+        stdin=SimpleNamespace(isatty=lambda: on)))
+
+
+class TestChoosingCalibration:
+    """Which calibration file this run uses is a *decision*, made every time.
+
+    The SDK's default path is "wherever the last calibration was saved" and its
+    ``load_calibration`` silently falls back to the shipped factory file when the
+    path it was given cannot be read.  Neither is this gripper's geometry, so
+    neither is an acceptable answer to "which angles should I command from?".
+    """
+
+    def test_an_explicit_path_is_used_without_asking(self, tmp_path, monkeypatch):
+        wanted = _calib_file(tmp_path / "mine.json")
+        _interactive(monkeypatch, False)      # 非交互也不该妨碍显式指定
+        chosen = _common.choose_calibration_file(
+            str(wanted), ask=lambda prompt: pytest.fail("不该提问"))
+        assert chosen == wanted
+
+    def test_the_candidates_leave_out_the_simulator_and_the_backups(
+            self, tmp_path):
+        real = _calib_file(tmp_path / "litegrip_calibration.json")
+        _calib_file(tmp_path / "litegrip_calibration.sim.json")
+        _calib_file(tmp_path / "litegrip_calibration.json.20260928.bak",
+                    kp=100.0)
+        assert _common.calibration_candidates([tmp_path]) == [real]
+
+    def test_the_newest_candidate_comes_first(self, tmp_path):
+        older = _calib_file(tmp_path / "a.json")
+        newer = _calib_file(tmp_path / "b.json")
+        os.utime(older, (1_600_000_000, 1_600_000_000))
+        os.utime(newer, (1_700_000_000, 1_700_000_000))
+        assert _common.calibration_candidates([tmp_path]) == [newer, older]
+
+    def test_a_simulator_calibration_is_refused_even_when_named(self, tmp_path):
+        """The studio keeps them apart on purpose; naming it must not override
+        that.  Its scale is the simulated gripper's."""
+        sim = _calib_file(tmp_path / "litegrip_calibration.sim.json")
+        with pytest.raises(SystemExit) as excinfo:
+            _common.choose_calibration_file(str(sim))
+        assert "仿真" in str(excinfo.value)
+
+    def test_a_missing_file_is_refused(self, tmp_path):
+        """The SDK would quietly load the factory calibration here; that is the
+        failure this refusal exists for."""
+        with pytest.raises(SystemExit, match="不存在"):
+            _common.choose_calibration_file(str(tmp_path / "nope.json"))
+
+    def test_a_file_without_the_sdks_keys_is_refused(self, tmp_path):
+        odd = tmp_path / "other.json"
+        odd.write_text(json.dumps({"hello": 1}), encoding="utf-8")
+        with pytest.raises(SystemExit) as excinfo:
+            _common.choose_calibration_file(str(odd))
+        message = str(excinfo.value)
+        assert "zero_position_rad" in message
+
+    def test_no_candidates_says_where_calibrations_come_from(self, monkeypatch):
+        _interactive(monkeypatch, True)
+        with pytest.raises(SystemExit) as excinfo:
+            _common.choose_calibration_file(None, candidates=[],
+                                            ask=lambda prompt: pytest.fail(
+                                                "没有候选还提问"))
+        message = str(excinfo.value)
+        assert "上位机" in message
+        assert "--calib" in message
+
+    def test_a_non_terminal_refuses_instead_of_picking_one(
+            self, tmp_path, monkeypatch):
+        """No tty means an operator is not there to choose -- and the answer is
+        never "use whatever the SDK defaults to"."""
+        real = _calib_file(tmp_path / "litegrip_calibration.json")
+        _interactive(monkeypatch, False)
+        with pytest.raises(SystemExit) as excinfo:
+            _common.choose_calibration_file(None, candidates=[real],
+                                            ask=lambda prompt: pytest.fail(
+                                                "非交互还提问"))
+        message = str(excinfo.value)
+        assert "--calib" in message
+        assert str(real) in message, "没把候选列出来，操作员不知道该指哪个"
+
+    def test_the_operator_picks_by_number(self, tmp_path, monkeypatch):
+        first = _calib_file(tmp_path / "a.json")
+        second = _calib_file(tmp_path / "b.json")
+        _interactive(monkeypatch, True)
+        printed: list[str] = []
+        chosen = _common.choose_calibration_file(
+            None, candidates=[first, second], ask=lambda prompt: "2",
+            out=printed.append)
+        assert chosen == second
+        listing = "\n".join(printed)
+        # The values are listed so the operator can recognise the file they just
+        # calibrated with -- the SDK records no provenance at all.
+        assert "rad_to_mm" in listing
+        assert "closed +0.1140" in listing
+        assert "mst_id 0x18" in listing, "ID 要按十六进制打，和命令行/日志一个写法"
+        assert f"1) {first}" in listing
+
+    def test_the_operator_can_type_a_path_instead(self, tmp_path, monkeypatch):
+        """The host software's "save as" can put a calibration anywhere."""
+        listed = _calib_file(tmp_path / "a.json")
+        elsewhere = _calib_file(tmp_path / "somewhere" / "else.json")
+        _interactive(monkeypatch, True)
+        chosen = _common.choose_calibration_file(
+            None, candidates=[listed], ask=lambda prompt: str(elsewhere),
+            out=lambda text: None)
+        assert chosen == elsewhere
+
+    def test_nonsense_input_asks_again_instead_of_guessing(
+            self, tmp_path, monkeypatch):
+        real = _calib_file(tmp_path / "a.json")
+        _interactive(monkeypatch, True)
+        answers = iter(["banana", "1"])
+        chosen = _common.choose_calibration_file(
+            None, candidates=[real], ask=lambda prompt: next(answers),
+            out=lambda text: None)
+        assert chosen == real
+
+    @pytest.mark.parametrize("answer", ["", "q", "quit"])
+    def test_declining_refuses_rather_than_defaulting(
+            self, tmp_path, monkeypatch, answer):
+        real = _calib_file(tmp_path / "a.json")
+        _interactive(monkeypatch, True)
+        with pytest.raises(SystemExit) as excinfo:
+            _common.choose_calibration_file(
+                None, candidates=[real], ask=lambda prompt: answer,
+                out=lambda text: None)
+        assert "标定" in str(excinfo.value)
+
+    def test_end_of_input_is_not_a_choice(self, tmp_path, monkeypatch):
+        real = _calib_file(tmp_path / "a.json")
+        _interactive(monkeypatch, True)
+
+        def eof(prompt):
+            raise EOFError
+
+        with pytest.raises(SystemExit) as excinfo:
+            _common.choose_calibration_file(None, candidates=[real], ask=eof,
+                                            out=lambda text: None)
+        assert "--calib" in str(excinfo.value)
+
+
+class TestCheckCalibrationMatchesArgs:
+    """A calibration file names the motor it was measured on."""
+
+    def test_a_matching_file_passes_and_says_nothing(self):
+        assert _common.check_calibration_matches_args(
+            CALIB, channel="can0", can_id=0x08, mst_id=0x18) == []
+
+    def test_a_different_motor_id_is_refused(self):
+        """The file that shipped with ``mst_id`` 18 (decimal, meant to be 0x18)
+        bound the RX filter to 0x12: a master that transmits and hears nothing."""
+        with pytest.raises(SystemExit) as excinfo:
+            _common.check_calibration_matches_args(
+                dict(CALIB, mst_id=18), can_id=0x08, mst_id=0x18)
+        message = str(excinfo.value)
+        assert "mst_id" in message
+        assert "0x18" in message
+
+    def test_a_different_can_id_is_refused(self):
+        with pytest.raises(SystemExit, match="can_id"):
+            _common.check_calibration_matches_args(
+                dict(CALIB, can_id=0x0A), can_id=0x08, mst_id=0x18)
+
+    def test_another_bus_is_only_a_note(self):
+        """Moving the gripper to another CAN port is routine; refusing to run
+        because the file says where it used to be plugged in would just block."""
+        notes = _common.check_calibration_matches_args(
+            CALIB, channel="can1", can_id=0x08, mst_id=0x18)
+        assert notes and "can0" in notes[0]
+
+    def test_a_file_that_names_no_motor_is_accepted(self):
+        """Older files have no ``can_id``/``mst_id``; there is nothing to check."""
+        assert _common.check_calibration_matches_args(
+            {"zero_position_rad": 0.1}, can_id=0x08, mst_id=0x18) == []
+
+
+class FakeCalibGrip:
+    """The slice of ``LiteGrip`` that loading a calibration touches.
+
+    ``apply=False`` is the SDK's silent factory fallback: it answers ``True``
+    without having read the file, which is exactly what a caller cannot detect
+    from the return value.
+    """
+
+    def __init__(self, apply: bool = True, takes_optional: bool = True) -> None:
+        self.apply = apply
+        self.takes_optional = takes_optional
+        self.paths: list[str] = []
+        self.config = SimpleNamespace(
+            pos_closed_rad=0.0, pos_open_rad=1.14, rad_to_mm=105.26,
+            max_stroke_mm=120.0, kp=100.0, kd=2.0, can_id=0x08, mst_id=0x18,
+            can_channel="can0",
+        )
+
+    def load_calibration(self, path: str | None = None) -> bool:
+        self.paths.append(str(path))
+        if not self.apply:
+            return True
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        self.config.pos_closed_rad = float(data["zero_position_rad"])
+        self.config.pos_open_rad = float(data["max_position_rad"])
+        self.config.rad_to_mm = float(data["rad_to_mm"])
+        if self.takes_optional:
+            for key, attr in (("kp", "kp"), ("kd", "kd"),
+                              ("can_id", "can_id"), ("mst_id", "mst_id"),
+                              ("channel", "can_channel")):
+                if key in data:
+                    setattr(self.config, attr, data[key])
+        return True
+
+
+class TestLoadingTheChosenCalibration:
+    """Loading it is not enough -- the run has to *be* using that file.
+
+    ``load_calibration`` returns ``True`` after silently substituting the factory
+    calibration, so the caller compares what it asked for against what the config
+    actually holds.  ``kp`` matters as much as the angles: it is the stiffness
+    every hold frame is sent with.
+    """
+
+    def test_a_file_that_took_effect_passes(self, tmp_path):
+        gripper = FakeCalibGrip()
+        path = _calib_file(tmp_path / "c.json")
+        data = _common.load_chosen_calibration(gripper, path)
+        assert data["kp"] == 5.0
+        assert gripper.paths == [str(path)]
+        assert gripper.config.pos_closed_rad == pytest.approx(0.114)
+        assert gripper.config.pos_open_rad == pytest.approx(-1.731)
+        assert gripper.config.kp == pytest.approx(5.0)
+
+    def test_a_silent_factory_fallback_is_caught(self, tmp_path):
+        gripper = FakeCalibGrip(apply=False)
+        path = _calib_file(tmp_path / "c.json")
+        with pytest.raises(SystemExit) as excinfo:
+            _common.load_chosen_calibration(gripper, path)
+        message = str(excinfo.value)
+        assert str(path) in message
+        assert "出厂" in message
+
+    def test_a_partly_applied_file_is_caught(self, tmp_path):
+        """Angles copied but ``kp`` left at the SDK default is still a different
+        gripper's stiffness than the one the operator calibrated."""
+        gripper = FakeCalibGrip(takes_optional=False)
+        path = _calib_file(tmp_path / "c.json")
+        with pytest.raises(SystemExit) as excinfo:
+            _common.load_chosen_calibration(gripper, path)
+        assert "kp" in str(excinfo.value)
+
+    def test_a_load_the_sdk_rejects_is_reported(self, tmp_path):
+        class Refusing(FakeCalibGrip):
+            def load_calibration(self, path=None) -> bool:
+                return False
+
+        with pytest.raises(SystemExit, match="载入标定失败"):
+            _common.load_chosen_calibration(Refusing(),
+                                           _calib_file(tmp_path / "c.json"))
+
+    def test_an_inconsistent_file_still_hits_the_guard(self, tmp_path):
+        """Whatever the file says, the angles have to make sense together."""
+        path = _calib_file(tmp_path / "c.json", zero_position_rad=-1.0,
+                           max_position_rad=1.0)
+        with pytest.raises(SystemExit, match="标定"):
+            _common.load_chosen_calibration(FakeCalibGrip(), path)
 
 
 class TestRadToFraction:
@@ -408,7 +709,17 @@ class TestArgParsers:
         assert args.channel == "can0"
         assert args.can_id == 0x08
         assert args.mst_id == 0x18
+        # ``None`` only means "not given on the command line": it is not a
+        # request for the SDK's default calibration.  ``choose_calibration_file``
+        # then asks, or refuses -- it never resolves ``None`` to a file.
         assert args.calib is None
+
+    def test_the_calib_flag_is_documented_as_mandatory(self):
+        parser = argparse.ArgumentParser()
+        _common.add_hardware_args(parser)
+        help_text = parser.format_help()
+        assert "--calib" in help_text
+        assert "上位机" in help_text, "没说标定文件从哪来"
 
     def test_hardware_args_accept_hex_and_decimal(self):
         parser = argparse.ArgumentParser()

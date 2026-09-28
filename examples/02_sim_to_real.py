@@ -21,9 +21,20 @@
 
     python3 examples/02_sim_to_real.py --dry-run    # 只开窗口，绝不碰 CAN
 
+⚠️ **每次都要先选定这台夹爪的标定文件**（标定文件由上位机标定后保存得到：
+
+    litegrip-studio / litegrip-console，或 SDK 自带的 tools/gui/litegrip_gui.py
+）。
+
+不给 ``--calib`` 就会在终端里列出候选让你选；选不出来（非交互、没有候选）直接
+退出——**不会**去用 SDK 的默认标定，更不会回退出厂标定。标定的角度和毫米刻度
+是一台机器一个值，拿别人的算目标角，轻则夹不住、重则一条指令撞限位。``--dry-run``
+也要选：它虽然不碰 CAN，但走的就是这套参数。
+
 真机跑：
 
-    python3 examples/02_sim_to_real.py                # can0, 10 N, 自动速度
+    python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
+    python3 examples/02_sim_to_real.py                # 不给就当场从候选里选
     python3 examples/02_sim_to_real.py --force 20 --duration 2
     python3 examples/02_sim_to_real.py --channel can1        # 换 CAN 口
 
@@ -56,15 +67,20 @@ import time
 
 from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     FRESH_WAIT_S,
+    NOMINAL_STROKE_MM,
     SAFETY_BANNER,
     STATUS_WAIT_S,
     add_common_args,
     add_hardware_args,
+    calibration_summary,
+    check_calibration_values,
+    choose_calibration_file,
     fraction_to_target_rad,
     fresh_state,
     import_litegrip,
     open_real_gripper,
     rad_to_fraction,
+    read_calibration_file,
     status_line,
 )
 
@@ -99,7 +115,8 @@ def parse_args() -> argparse.Namespace:
     add_common_args(ap)
     add_hardware_args(ap)
     ap.add_argument("--dry-run", action="store_true",
-                    help="不连真机、不下发任何指令（只开窗口看流程）")
+                    help="不连真机、不下发任何指令（只开窗口看流程）；"
+                         "标定照样要先选——它决定目标角和毫米刻度")
     ap.add_argument("--force", type=float, default=10.0,
                     help=f"夹持力前馈 [N]（默认 10，上限 {MAX_GRIP_FORCE_N:g}）")
     ap.add_argument("--duration", type=float, default=None,
@@ -454,6 +471,10 @@ def run_status(args: argparse.Namespace) -> int:
     output"），都不带位置/力矩目标。所以电机不会产生任何运动，可以在夹着工件、
     或手指在别人手里的时候安全地跑。
 
+    标定照样要先选（``--calib`` 或当场从候选里选）：读回来的位置要换成开度，
+    靠的就是标定的角度和 ``rad_to_mm``——用别台机器的刻度换算，打出来的百分比
+    是错的，而这条路径存在的意义就是让这个百分比可信。
+
     加 ``--clear-fault`` 才会写：发的也只是 SDK 的故障清除序列——全程
     ``kp=0/kd=0/tau=0`` 的零力矩帧，**不命令任何运动**。但要说清楚：
     ``clear_fault()`` 内部是 disable → clear → enable，中间那一瞬间电机是失力
@@ -575,6 +596,17 @@ def main() -> int:
     force_n = max(0.0, min(MAX_GRIP_FORCE_N, args.force))
     if args.dry_run:
         print("样例 02 · 仿真控制真机（--dry-run：不碰真机，只走流程）")
+        # dry-run 也要先选标定：它走的正是这套参数（目标角、毫米刻度都由标定
+        # 决定）。只读文件、不导入 SDK、不建 CAN 对象——所以这里用纯值版的自洽
+        # 检查，SDK 那边的 config 此刻不存在。
+        calib_path = choose_calibration_file(args.calib)
+        calib = read_calibration_file(calib_path)
+        check_calibration_values(
+            float(calib["zero_position_rad"]), float(calib["max_position_rad"]),
+            float(calib["rad_to_mm"]), NOMINAL_STROKE_MM,
+        )
+        print(f"   标定 {calib_path}")
+        print(f"        {calibration_summary(calib)}")
         gripper = None
         n_to_nm = NOMINAL_N_TO_NM
     else:

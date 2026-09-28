@@ -14,7 +14,11 @@
   * **看别人的程序驱动**：加 ``--passive``，本样例一帧都不发，只读；由那个
     程序去喂真机。
 
-⚠️ 为什么必须持续发帧（默认模式）：**使能态**的电机静默约
+⚠️ 每次都要先选定这台夹爪的标定文件：``--calib`` 指定，不给就在终端里从候选里
+选，选不出来直接退出（**不会**用 SDK 的默认标定或出厂标定）。仿真的百分比和
+毫米都由标定的角度/``rad_to_mm`` 换算而来，用别台机器的刻度，画面就是错的。
+
+⚠️ 为什么默认模式必须持续发帧：**使能态**的电机静默约
 :data:`MEASURED_COMM_LOSS_S` 就锁进通信丢失故障（0xD）——红灯闪、位置照读、指令
 一律不执行。所以「只是看」也得喂帧，见 :data:`FRAME_HZ`。别拿电机的 ``TIMEOUT``
 寄存器（RID 9）推算这个时长：它读到过 8000 ms，也读到过 0＝当前不生效，和实测都
@@ -32,7 +36,7 @@
 自己滑动。托住夹爪再看，别让它在行程中间突然松掉。
 
 运行：
-  python3 examples/03_real_to_sim.py --zero-gravity     # 用手推，仿真跟着动
+  python3 examples/03_real_to_sim.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
   python3 examples/03_real_to_sim.py                    # 只镜像（发锁位帧保活）
   python3 examples/03_real_to_sim.py --passive          # 一帧不发，等别人喂
   python3 examples/03_real_to_sim.py --headless         # 无窗口，只看终端读数
