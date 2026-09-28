@@ -32,11 +32,17 @@
     python3 examples/02_sim_to_real.py --status             # 只连、只读，不发一帧
     python3 examples/02_sim_to_real.py --status --clear-fault   # 清掉锁死的故障
 
-红灯闪 + 位置照读 + 指令无效，是电机进了**锁死**的故障态（欠压/过流/过温）。
-最常见的原因是控制端把「目标」当阶跃发出去：MIT 的 kp 是位置刚度，一整段
-行程的阶跃会让电机在第一帧就要求上百牛米（额定才 10 Nm 左右），电流拉满即
-报保护。本样例现在发的是**斜坡**（见 :class:`StreamMove`），和 SDK 自己的
-``goto_rad`` 一样，不会再踩这个坑。
+红灯闪 + 位置照读 + 指令无效，是电机进了**锁死**的故障态，而 ``--status`` 打的
+那个错误码就是它的名字（0xD = 通信丢失、0x9 = 欠压、0xA = 过流、0xB/0xC = 过温
+……）。两类原因最常见：
+
+  * **没人喂帧**：使能态的电机静默约 :data:`MEASURED_COMM_LOSS_S` 就报 0xD。所以
+    空闲也得持续发帧（见 :class:`IdleKeeper`）。
+  * **一条接不住的指令**：MIT 的 kp 是位置刚度，一整段行程的阶跃会让电机在第一帧
+    就被要求输出 ``kp × 1.845 rad`` 那么大的力矩。SDK 默认 kp=100 Nm/rad，那是
+    185 Nm，而额定只有 ~10 Nm；本机标定现在是 5.0，同样的阶跃约 9 Nm。但 kp 是
+    标定文件里的一项、随时可能被改回去，所以本样例发的是**斜坡**
+    （见 :class:`StreamMove`），和 SDK 自己的 ``goto_rad`` 一样，不押在某个 kp 上。
 
 为什么要自己发帧：SDK 的 move_to()/goto_rad() 内部是 control_mit_stream()，
 它自己 sleep 5 ms 循环、不让出控制权，PyBullet 窗口会卡住、也读不到按键。
@@ -114,12 +120,14 @@ class StreamMove:
 
     ⚠️ 为什么必须斜坡，不能直接跳到目标：
 
-    MIT 的位置增益是 ``kp``（这儿 100 Nm/rad）。一次的阶跃如果有一整段行程那么
-    大（1.845 rad），电机在第一帧就被要求输出 ``100 × 1.845 ≈ 185 Nm``——而
-    DM4310 额定力矩才 ~10 Nm。电流瞬间拉满，电机进欠压/过流保护并**锁死**，红
-    灯闪烁，之后就不再执行任何指令了（位置照常回报，所以看起来是「能读、不能
-    控」）。SDK 自己的 ``goto_rad`` / ``move_at_speed`` 也都是线性斜坡，正是为了
-    避免这一下；这里跟它保持一致。
+    MIT 的位置增益是标定文件里的 ``kp``：一帧要的力矩就是 ``kp × 目标与实测的
+    差``。SDK 默认 kp=100 Nm/rad，一整段行程（1.845 rad）的阶跃会在第一帧要求
+    ``100 × 1.845 ≈ 185 Nm``，而 DM4310 额定只有 ~10 Nm——电流瞬间拉满，电机进
+    欠压/过流保护并**锁死**，红灯闪烁，之后就不再执行任何指令（位置照常回报，
+    所以看起来是「能读、不能控」）。本机标定现在把 kp 调到 5.0，同样的阶跃约
+    9 Nm、落在额定之内，但 kp 是标定里的一项、随时可能被改回去，所以不押它：
+    斜坡限制的是**位置目标**的跳变，与 kp 取多少无关。SDK 自己的 ``goto_rad`` /
+    ``move_at_speed`` 也都是线性斜坡，这里跟它保持一致。
 
     两段的差别：
 
@@ -227,23 +235,20 @@ def plan_duration(gripper, distance_rad: float, requested: float | None) -> floa
     return max(requested, min_s)
 
 
-#: SDK 的 ``ERROR_DESCRIPTIONS`` 认得 0x0/0x1/0x9/0xA/0xB/0xC，唯独不认 0xD——
-#: 而本机最容易锁上的恰恰是它：``TIMEOUT`` 寄存器到期、这期间一帧都没收到，电机
-#: 就报这个码（见 README 的故障表）。SDK 只会说「未知错误」，操作员
-#: 看不出「这是喂帧断了」和「电机坏了」的区别。其余码仍以 SDK 为准，免得两处
-#: 描述慢慢走偏。
-EXTRA_ERRORS = {
-    0xD: "通信超时故障（TIMEOUT 期内一帧都没收到）",
-}
-
-#: 没装 SDK 时的兜底表，内容抄自 ``litegrip.constants.ERROR_DESCRIPTIONS``。
+#: 没装 SDK（或者 SDK 比这颗错误码还老）时的兜底表，内容抄自
+#: ``litegrip.constants.ERROR_DESCRIPTIONS`` 的当前版本。0x8/0xD/0xE 是 SDK 后来
+#: 补上的；旧版会把它们报成「未知错误」，而本机最容易闩上的恰恰是 0xD，所以这里
+#: 必须自己认识它。
 FALLBACK_ERRORS = {
     0x0: "已失能",
     0x1: "已使能",
+    0x8: "过压故障 (OV)",
     0x9: "欠压故障 (UV)",
     0xA: "过流故障 (OC)",
     0xB: "MOS 过温故障",
     0xC: "线圈过温故障",
+    0xD: "通讯丢失 (CAN 超时)",
+    0xE: "过载故障",
 }
 
 
@@ -253,21 +258,27 @@ def describe_code(error_code: int) -> str:
     故障路径是最不该抛异常的地方：负责报故障的代码自己崩了，操作员就只剩一个
     回溯，看不到电机报的到底是哪一条。所以 ``describe_error`` 是懒导入且**带
     兜底**的——``--dry-run`` 和 CI 没装 SDK 也照样能翻译错误码。
+
+    认得这个码就用 SDK 的说法（0xD 已经在它的 ``ERROR_DESCRIPTIONS`` 里了）；
+    SDK 回「未知错误」＝它的表里没有这个码（那是 ``describe_error`` 唯一的兜底
+    话术），这时才退回本表。反过来先查本表是不行的：两处描述会慢慢走偏。
     """
-    if error_code in EXTRA_ERRORS:
-        return EXTRA_ERRORS[error_code]
     try:
         from litegrip.constants import describe_error
     except ImportError:
         return FALLBACK_ERRORS.get(error_code, f"未知错误 (0x{error_code:X})")
-    return describe_error(error_code)
+    text = describe_error(error_code)
+    if text.startswith("未知错误"):
+        return FALLBACK_ERRORS.get(error_code, text)
+    return text
 
 
 def fault_of(state) -> str | None:
     """状态里有故障就返回可读描述，否则 ``None``。
 
-    电机故障（欠压/过流/过温）是**锁死**的：不报错也不动，位置照常回报。必须在
-    循环里盯着，否则会一直对着一个已经不听话的电机发帧。
+    电机的故障（0xD 通信丢失、0x9 欠压、0xA 过流、0xB/0xC 过温）是**锁死**的：
+    不报错也不动，位置照常回报。必须在循环里盯着，否则会一直对着一个已经不听
+    话的电机发帧。
     """
     if not state.is_error:
         return None
@@ -288,8 +299,8 @@ def hold_frame(
     ⚠️ 「现在的位置」必须真的**是现在**，所以走 :func:`fresh_state`（等到一帧新的
     状态帧）而不是 ``get_state(wait=False)`` 的缓存。缓存里没读到过位置时是 SDK
     的初值 ``0.0``——拿它当目标发出去，就是一条指向 0 rad 的**阶跃**指令，电机按
-    ``kp=100`` 去追那个根本不存在的误差。少发一帧不会让电机乱动，发错目标会，
-    所以读不到就返回 ``None``，调用方负责不发。
+    标定里的 ``kp``（SDK 默认 100 Nm/rad）去追那个根本不存在的误差。少发一帧不会
+    让电机乱动，发错目标会，所以读不到就返回 ``None``，调用方负责不发。
 
     Args:
         request: 等之前先发一帧 READ-ONLY 的 ``0xCC`` 状态请求（见
@@ -463,7 +474,7 @@ def run_status(args: argparse.Namespace) -> int:
     cleared = 0
     try:
         # 没使能的电机不会自己发帧，所以先请它回一帧（0xCC，只读、不改输出）
-        # 再读。少了这一步，等不到的 poll 会让 get_state() 返回 SDK 的初值
+        # 再读。少了这一步，等不到的 poll 会让 get_state() 返回 MotorState 的初值
         # 0.0——打印出来就是「5.5% / 6.63 mm」这种**伪造**读数（真值实测是
         # −0.370 rad ≈ 27.5%），拿来判断故障只会把人带偏。
         state = fresh_state(gripper, timeout_s=STATUS_WAIT_S, request=True)
@@ -471,8 +482,10 @@ def run_status(args: argparse.Namespace) -> int:
             print(f"   ❌ 读不到状态帧：已经请它回一帧（0xCC，不改电机输出）"
                   f"并等了 {STATUS_WAIT_S:g} s。")
             print("      **这种情况下没有可信的位置，也没有可信的故障码**：")
-            print("      SDK 的 get_state() 这时返回的是它自己的初值 0.0，打出来"
-                  "看着像「夹爪在 5.5%」，「从没读到过」才是它的真意。")
+            print("      SDK 现在会把这件事说出来——GripperState.has_data 为假、"
+                  "is_stale 为真——而 get_state() 返回的 position 只是它构造时的"
+                  "初值 0.0。打出来看着像「夹爪在 5.5%」，「从没读到过」才是它的"
+                  "真意。")
             print("      查这几处：")
             print("        · 夹爪是否上电；CAN_H/CAN_L 有没有接反；120Ω 终端电阻；")
             print(f"        · 接口是否真的起来：ip -details link show {args.channel}")
@@ -603,9 +616,11 @@ def main() -> int:
         if gripper is None:
             print("   （dry-run：按 Enter 只打印，不会真的下发）")
         else:
-            # 使能之后**立刻**喂一帧锁在当前位置，不等主循环第一圈：`enable()`
-            # 打完那条零力矩底帧就不再发了（SDK 的 initialize 不负责保活），
-            # 而建窗口、建滑条这些事要几百毫秒。先喂上，通信超时计数器归零。
+            # 使能之后**立刻**喂一帧锁在当前位置，不等主循环第一圈。SDK 的
+            # `enable()` 现在会自己抱在实测位置（`_enable_and_hold`：使能帧 →
+            # 0.05 s 零力矩流 → 等一帧新状态 → 锁位），但那条流只有 50 ms，之后
+            # 就没人喂了，而建窗口、建滑条要几百毫秒——使能态静默约
+            # `MEASURED_COMM_LOSS_S` 就锁 0xD，等不起。所以先喂上，计数器归零。
             keeper = IdleKeeper(gripper)
             keeper.maybe_send(time.monotonic())
             print(f"   [真机] 已锁在当前位置（保活 {IDLE_HZ:g} Hz 已开始，"

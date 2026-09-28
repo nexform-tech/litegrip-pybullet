@@ -507,11 +507,25 @@ class TestDescribingAFault:
     """
 
     def test_the_communication_watchdog_code_is_named(self):
-        """0xD is what this hardware latches, and the SDK calls it 未知错误."""
+        """0xD is what this hardware latches; the SDK now names it itself."""
         text = ex02.describe_code(0xD)
         assert "0xD" not in text and "未知错误" not in text, \
             f"0xD 又被打回「未知错误」了：{text}"
-        assert "TIMEOUT" in text or "超时" in text
+        assert "超时" in text or "丢失" in text
+
+    def test_a_stale_sdk_falls_back_to_our_own_table(self, monkeypatch):
+        """An SDK old enough to call 0xD unknown must not win over the table.
+
+        ``describe_error``'s only fallback wording is 未知错误, so that string is
+        the signal that *this* SDK's table does not have the code — the case the
+        local table exists for.
+        """
+        stub = SimpleNamespace(describe_error=lambda code: f"未知错误 (0x{code:X})")
+        monkeypatch.setitem(sys.modules, "litegrip", SimpleNamespace())
+        monkeypatch.setitem(sys.modules, "litegrip.constants", stub)
+        text = ex02.describe_code(0xD)
+        assert "未知错误" not in text, f"旧 SDK 一句话就把 0xD 顶掉了：{text}"
+        assert "超时" in text or "丢失" in text
 
     def test_the_sdk_still_gets_the_codes_it_knows(self):
         """Duplicating the table must not shadow the SDK's own wording."""
@@ -521,7 +535,7 @@ class TestDescribingAFault:
         """Exactly CI's situation: ``from litegrip... import`` raises."""
         monkeypatch.setitem(sys.modules, "litegrip", None)
         monkeypatch.setitem(sys.modules, "litegrip.constants", None)
-        for code in (0x0, 0x1, 0x9, 0xA, 0xB, 0xC, 0xD):
+        for code in (0x0, 0x1, 0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE):
             text = ex02.describe_code(code)
             assert "未知错误" not in text, \
                 f"没装 SDK 就翻译不出 0x{code:X} 了：{text!r}"
@@ -530,10 +544,12 @@ class TestDescribingAFault:
 
 
 class TestItNeverLeavesTheMotorUnfed:
-    """``enable()`` sends one priming frame and then stops; everything the
-    example does between that and its first loop frame is dead time, and enough
-    of it latches a communication-loss fault on an enabled, unattended motor
-    (``TIMEOUT``, RID 9 — 8000 ms when it was last read nonzero)."""
+    """``enable()`` holds the motor, but only for the 50 ms stream it sends.
+
+    Everything the example does between that and its first loop frame is dead
+    time, and enough of it latches a communication-loss fault on an enabled,
+    unattended motor — measured at about 0.9 s of silence, not the ``TIMEOUT``
+    register's 8000 ms, which reads 0 as often as not."""
 
     def test_a_frame_goes_out_before_the_window_is_even_used(self, monkeypatch):
         run = _run(monkeypatch, steps=0)      # the window dies immediately
