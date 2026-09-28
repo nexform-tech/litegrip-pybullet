@@ -96,11 +96,15 @@ python3 examples/01_sim_only.py --slip 40       # 一定会滑的拉力
    会掉，但不会在电机上留下通信超时故障。
 
 ```bash
+python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
 python3 examples/02_sim_to_real.py --dry-run         # 只开窗口，绝不碰 CAN
 python3 examples/02_sim_to_real.py                   # can0，10 N，自动速度
 python3 examples/02_sim_to_real.py --force 20 --duration 2
 python3 examples/02_sim_to_real.py --channel can1    # 换一个 CAN 口
 ```
+
+`--calib` 每次都要给，`--dry-run` 也不例外；不给的话样例会列出候选让你选，见
+[「上真机之前」](#上真机之前)。
 
 `--headless` 会被拒绝：滑条就是输入设备，而 DIRECT 连接里没有滑条。无窗口请用 01。
 
@@ -125,7 +129,8 @@ python3 examples/02_sim_to_real.py --status --clear-fault    # 清掉锁死的�
 ```
 
 `--status` 不开窗口、不使能、**不发送任何运动指令**，只把错误码读出来并翻译成人话，
-可以在夹着工件或手指在别人手里的时候安全地跑。加 `--clear-fault` 才会发帧，发的也
+可以在夹着工件或手指在别人手里的时候安全地跑。它同样碰真机，所以同样要先出示标定文件
+（上面两行按实际用法都要加 `--calib <路径>`，或者让它在终端里列出候选）。加 `--clear-fault` 才会发帧，发的也
 全是零力矩帧，不命令运动；但 SDK 的清除流程本身是 disable → clear → enable，中间
 那一瞬间电机是失力的，手指可能因自重轻微滑动——先托住夹爪再清。
 
@@ -186,15 +191,18 @@ ip -details -statistics link show can0      # 总线忙不忙：要没人跑时�
 
 - **用手推着看**（`--zero-gravity`，推荐）：电机失力，可以用手推动手指，窗口跟着
   你的手走。运行中按 **Z** 可以随时切换失力/使能。
-- **看别人的程序驱动**（`--passive`）：本样例一帧都不发，只读；由那个程序去喂真机。
+- **看别人的程序驱动**（`--passive`）：本样例只连接、只读，**不使能**，一帧都不发；
+  喂真机的事归那个程序。
 
 ```bash
-python3 examples/03_real_to_sim.py --zero-gravity   # 用手推
+python3 examples/03_real_to_sim.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
 python3 examples/03_real_to_sim.py                  # 只镜像（发锁位帧保活）
-python3 examples/03_real_to_sim.py --passive        # 一帧不发，等别人喂
+python3 examples/03_real_to_sim.py --passive        # 不使能、一帧不发，等别人喂
 python3 examples/03_real_to_sim.py --headless       # 只看终端读数
 python3 examples/03_real_to_sim.py --duration 10    # 10 s 后自动退出
 ```
+
+和 02 一样，每次都得出示标定文件，见[「上真机之前」](#上真机之前)。
 
 #### 为什么「只是看」也得持续发帧
 
@@ -208,9 +216,10 @@ python3 examples/03_real_to_sim.py --duration 10    # 10 s 后自动退出
 上。想用手推着看镜像就加 `--zero-gravity`（或按 Z），那同样是持续发帧，只是 kp/kd
 都归零。
 
-真的要让**别的程序**驱动真机时加 `--passive`：本样例一帧都不发，Z 键也一并禁掉，免得
-两边发的帧互相打架。代价是那个程序必须自己喂帧，否则约 0.9 s 后真机照锁 0xD。
-**单跑别加 `--passive`。**
+真的要让**别的程序**驱动真机时加 `--passive`：本样例**不使能**、一帧都不发，Z 键也
+一并禁掉，免得两边发的帧互相打架。代价是那个程序必须自己喂帧，否则约 0.9 s 后真机照锁
+0xD。**单跑别加 `--passive`。**（不使能这件事本身也重要：使能了却没人喂帧，正是上面那条
+故障的触发条件。）
 
 `--zero-gravity`（或按 Z）让夹爪变**软**，手指可以被推动，也会因为重力自己滑。使能
 之前先托住夹爪。
@@ -224,15 +233,33 @@ python3 examples/03_real_to_sim.py --duration 10    # 10 s 后自动退出
 两个真机样例都会先打印安全横幅，使用姿势是：夹爪拿在手上或固定在台面上，
 **行程内不放任何东西**，电源开关触手可及。02 的第一次跑应当是 `--dry-run`。
 
-动之前先确认 CAN 接口和标定：
+动之前先确认 CAN 接口：
 
 ```bash
 ip -details link show can0
 ```
 
-样例自己会检查标定，不一致就拒绝启动——SDK 的出厂默认值里的张开角度与它自己
-`goto()` 的符号约定相矛盾，所以未标定的机器会被拦下来并给出说明，而不是拿一个
-没有意义的角度去驱动它。
+**先选定这台夹爪的标定文件。** 凡是碰真机的路径都从这里开始——`--status`、
+`--dry-run`、03 的 `--passive` 也一样——而且**不接受**默认标定：
+
+```bash
+python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/02_sim_to_real.py            # 不给 --calib：它会列出候选让你选
+```
+
+不给 `--calib` 时，会把 `~/.litegrip` 下的候选连同修改时间和关键值（闭合/张开角度、
+`rad_to_mm`、`kp`、`mst_id`）列出来，你输编号选一个，也可以直接输路径。上位机给
+仿真后端单独存的 `*.sim.json` 和 `*.bak` 备份**不会**出现在候选里，显式指定
+`*.sim.json` 也会被拒——那份刻度是仿真里的。没有终端可问（管道、脚本、CI）或者
+一份候选都没有时，程序直接停下，并说明标定文件从哪来、`--calib` 怎么给。
+
+标定文件是用上位机（`litegrip-studio` / `litegrip-console`，或 SDK 自带的
+`tools/gui/litegrip_gui.py`）对着**这台**夹爪标定后保存出来的。之所以要这么严：
+SDK 的 `load_calibration` 在路径读不出来时会**静默改用打包的出厂标定**，而且照样
+返回 `True`——路径打错一个字母，就会拿另一台机器的角度去驱动电机。所以样例自己读
+这份文件、逐字段核实它确实生效，并且会拒绝 `can_id`/`mst_id` 指向另一台电机的
+文件。角度本身也要自洽：SDK 出厂默认值里的张开角度与它自己 `goto()` 的符号约定
+相矛盾，未标定的机器会被拦下来并给出说明，而不是拿一个没有意义的角度去驱动它。
 
 ## 说明
 
@@ -245,6 +272,7 @@ ip -details link show can0
 **抓取中心在哪。** `[0.0, 0.0, 0.0665]` m——在两指中间，离底座顶面 22.5 mm。
 `getAABB` 会把每个 link 放大约 3 mm，所以不要用它读开口，用 `aperture_mm()`。
 
-**共用的部分。** [`_common.py`](_common.py) 放着参数解析、SDK 查找、连接/使能流程、
-单位换算和状态行。它不是第四个样例——另外三个都 import 它，所以每个样例都是先
+**共用的部分。** [`_common.py`](_common.py) 放着参数解析、SDK 查找、标定选择
+（`choose_calibration_file`、候选列表、「这份文件到底生效了没有」的核实）、连接/使能
+流程、单位换算和状态行。它不是第四个样例——另外三个都 import 它，所以每个样例都是先
 `from _common import ...` 再 import `litegrip_pybullet`。

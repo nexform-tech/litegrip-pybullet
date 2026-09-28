@@ -111,11 +111,16 @@ You set the target in the PyBullet window; pressing Enter sends it.
    communication-loss fault is left latched on the motor.
 
 ```bash
+python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
 python3 examples/02_sim_to_real.py --dry-run         # window only, never touches CAN
 python3 examples/02_sim_to_real.py                   # can0, 10 N, automatic speed
 python3 examples/02_sim_to_real.py --force 20 --duration 2
 python3 examples/02_sim_to_real.py --channel can1    # a different CAN port
 ```
+
+`--calib` is required on every run, `--dry-run` included; without it the example
+lists the calibration candidates and asks (see
+[Before you drive the hardware](#before-you-drive-the-hardware)).
 
 `--headless` is refused: the sliders are the input device, and a DIRECT
 connection has no sliders. Use 01 for a headless run.
@@ -145,7 +150,9 @@ python3 examples/02_sim_to_real.py --status --clear-fault    # clear the latched
 
 `--status` opens no window, does not enable the motor and **sends no motion
 command at all** — it just reads the error code and translates it, so it is safe
-to run while the gripper holds a part or is in someone's hands. Only
+to run while the gripper holds a part or is in someone's hands. It touches the
+hardware, so it needs the calibration file too: the two lines above each take a
+`--calib <path>`, or let the example list the candidates on a terminal. Only
 `--clear-fault` sends frames, and those are all zero-torque; but the SDK's clear
 sequence is disable → clear → enable, so the motor goes limp for an instant and
 the fingers may drift under their own weight. Support the gripper first.
@@ -218,16 +225,20 @@ Two ways to use it:
 - **Push it by hand** (`--zero-gravity`, recommended): the motor goes slack and
   you can move the fingers yourself. The window follows your hand. Press **Z**
   while running to toggle slack/enabled.
-- **Watch another program drive it** (`--passive`): this example sends nothing at
-  all and leaves the feeding to that program.
+- **Watch another program drive it** (`--passive`): this example connects, reads,
+  and leaves the feeding to that program — it does not enable the motor and sends
+  nothing at all.
 
 ```bash
-python3 examples/03_real_to_sim.py --zero-gravity   # push it by hand
+python3 examples/03_real_to_sim.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
 python3 examples/03_real_to_sim.py                  # mirror (hold frames keep it alive)
-python3 examples/03_real_to_sim.py --passive        # send nothing, let someone else feed it
+python3 examples/03_real_to_sim.py --passive        # read only, let someone else feed it
 python3 examples/03_real_to_sim.py --headless       # terminal readings only
 python3 examples/03_real_to_sim.py --duration 10    # stop after 10 s
 ```
+
+Like 02, this needs a calibration file on every run — see
+[Before you drive the hardware](#before-you-drive-the-hardware).
 
 #### Why "just watching" still has to send frames
 
@@ -246,10 +257,10 @@ stiffness and keeps the watchdog fed. To back-drive it instead, add
 `--zero-gravity` (or press Z), which streams the same way with kp/kd zeroed.
 
 Use `--passive` when a **different program** is driving the hardware: this example
-then sends no frames and disables the Z key, so the two never fight over the bus.
-The cost is that the other program has to feed the motor itself, or it latches
-0xD about 0.9 s later anyway. **Do not combine `--passive` with running this
-example alone.**
+then sends no frames, does not enable the motor, and disables the Z key, so the
+two never fight over the bus. The cost is that the other program has to feed the
+motor itself, or it latches 0xD about 0.9 s later anyway. **Do not combine
+`--passive` with running this example alone.**
 
 `--zero-gravity` (or Z) makes the gripper *soft*, so the fingers can be
 back-driven and can also sag under gravity. Support the gripper before enabling
@@ -266,16 +277,40 @@ Both hardware examples print a safety banner and are meant to be run with the
 gripper in hand or clamped to a bench, **with the travel clear**, and the power
 switch within reach. The first run of 02 should be `--dry-run`.
 
-Confirm the CAN interface and the calibration before anything moves:
+Confirm the CAN interface before anything moves:
 
 ```bash
 ip -details link show can0
 ```
 
-The examples check the calibration themselves and refuse to start if it is
-inconsistent — the SDK's factory defaults ship an opening angle that contradicts
-its own `goto()` convention, so an uncalibrated unit is stopped with an
-explanation rather than driven with meaningless angles.
+**Pick this gripper's calibration file first.** Every path that touches the
+hardware starts there — `--status`, `--dry-run` and 03's `--passive` included —
+and the default is deliberately not an option:
+
+```bash
+python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/02_sim_to_real.py            # no --calib: it lists candidates
+```
+
+Without `--calib` the candidates in `~/.litegrip` are listed with their mtime and
+key values (closed/open angles, `rad_to_mm`, `kp`, `mst_id`) and you pick one by
+number, or type a path. The `*.sim.json` file the studio writes for its simulator
+backend and the `*.bak` backups are never offered, and a `*.sim.json` named
+explicitly is refused — its scale belongs to the simulated gripper. With no
+terminal to ask on (a pipe, a script, CI) or nothing to offer, the run stops and
+says how to get a calibration and how to pass one.
+
+The file comes from calibrating *this* gripper in the host software
+(`litegrip-studio` / `litegrip-console`, or the SDK's own
+`tools/gui/litegrip_gui.py`) and saving it. That matters because the SDK's
+`load_calibration` loads the shipped factory calibration *silently* when the path
+it was given cannot be read, and still returns `True` — so a mistyped path would
+otherwise drive the motor with another machine's angles. The examples therefore
+read the file themselves and check it took effect field by field, and they refuse
+a file whose `can_id`/`mst_id` name a different motor. They also check the angles
+are self-consistent: the SDK's factory defaults ship an opening angle that
+contradicts its own `goto()` convention, and an uncalibrated unit is stopped with
+an explanation rather than driven with meaningless angles.
 
 ## Notes
 
@@ -293,7 +328,8 @@ device, not a physical effect; the same trick is used in
 3 mm, so never read the jaw opening from it; use `aperture_mm()`.
 
 **Shared helpers.** [`_common.py`](_common.py) holds the argument parsers, the
-SDK discovery, the connect/enable sequence, the unit conversions and the status
-line. It is not a fourth example — it is imported by the other three, which is why
-each starts with `from _common import ...` *before* importing
-`litegrip_pybullet`.
+SDK discovery, the calibration choice (`choose_calibration_file`, the candidate
+listing, the "did the file actually take effect" check), the connect/enable
+sequence, the unit conversions and the status line. It is not a fourth example —
+it is imported by the other three, which is why each starts with
+`from _common import ...` *before* importing `litegrip_pybullet`.

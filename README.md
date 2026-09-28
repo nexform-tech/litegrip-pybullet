@@ -114,6 +114,14 @@ causes on this hardware:
 Both faults are diagnosed and cleared without moving the motor via
 `examples/02_sim_to_real.py --status [--clear-fault]`.
 
+Every example path that touches the hardware also has to be told which
+calibration file to use: pass `--calib <path>`, or let it list the candidates on
+a terminal and pick one. The default is deliberately not accepted, because the
+SDK's `load_calibration` falls back to the shipped factory calibration *silently*
+when the path it was given cannot be read. Calibrate this gripper in the host
+software and save the file from there — see
+[examples/README.md](examples/README.md#before-you-drive-the-hardware).
+
 The simulation dynamics are PyBullet's, with the URDF's own inertias. The
 finger speed limit and the force cap are enforced by this library; the reported
 servo settling time is a measured property of the simulated position servo, not a
