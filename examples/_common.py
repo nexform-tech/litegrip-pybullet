@@ -6,6 +6,7 @@
 
   ensure_deps()      缺 pybullet 时自动改用仓库自带 .venv 重跑
   import_litegrip()  导入真机 SDK（已安装 / 同级 lite-grip 仓库 / $LITEGRIP_SDK_DIR）
+  check_sdk_api()    核对 SDK 有没有本仓库依赖的公开接口，缺了就在启动时停下
   add_common_args()  --urdf / --headless
   add_hardware_args() --channel / --can-id / --mst-id / --calib
   open_real_gripper() 连接 → 载入标定 → 使能，失败时给出可读的提示
@@ -29,15 +30,18 @@ import sys
 from pathlib import Path
 
 __all__ = [
+    "REQUIRED_SDK_API",
     "SAFETY_BANNER",
     "add_common_args",
     "add_hardware_args",
     "bootstrap_src",
     "check_calibration",
+    "check_sdk_api",
     "ensure_deps",
     "fraction_to_target_rad",
     "fresh_state",
     "import_litegrip",
+    "missing_sdk_api",
     "open_real_gripper",
     "rad_to_fraction",
     "request_status_frame",
@@ -116,13 +120,66 @@ def import_litegrip():
         import litegrip
     except ImportError as exc:
         raise SystemExit(
-            "❌ 找不到真机 SDK（litegrip 包）。三种任选其一：\n"
-            "   1) pip install litegrip\n"
+            "❌ 找不到真机 SDK（litegrip 包）。\n"
+            "   litegrip **没有发布到 PyPI**，`pip install litegrip` 装的不是它；\n"
+            "   本仓库要的是带 refresh_status() / GripperState.data_age_s 这些公开\n"
+            "   接口的检出。三种任选其一：\n"
+            "   1) python3 -m pip install -e /path/to/lite-grip\n"
             "   2) export LITEGRIP_SDK_DIR=/path/to/lite-grip\n"
             "   3) 把 lite-grip 仓库克隆到本仓库的同级目录\n"
             f"   （原始错误：{exc}）"
         ) from exc
     return litegrip
+
+
+#: 本仓库依赖的 SDK 公开接口。清单化而不是散在各调用处：缺哪一个就在**启动时**
+#: 说清楚该换哪份 SDK，而不是在发帧的循环里抛 AttributeError。
+#:
+#: 这些接口目前**没有任何发行版带**（litegrip 也不在 PyPI 上），所以
+#: ``pip install litegrip`` 装到的那份一定缺它们——这正是要拦的情况。
+REQUIRED_SDK_API: tuple[tuple[str, str], ...] = (
+    ("LiteGrip.refresh_status",
+     "发一帧只读的 0xCC 并等回应，电机不发帧时唯一能读到位置的公开路径"),
+    ("GripperState.data_age_s",
+     "这一帧有多旧（从没收到过是 inf）——判断读数能不能用"),
+    ("GripperState.has_data", "到底收到过状态帧没有"),
+    ("GripperState.is_stale", "这一帧是不是已经过期"),
+)
+
+
+def missing_sdk_api(litegrip) -> list[str]:
+    """已导入的 SDK 里缺哪些必需接口（按 :data:`REQUIRED_SDK_API` 的顺序）。"""
+    missing: list[str] = []
+    for path, _why in REQUIRED_SDK_API:
+        owner, _, attr = path.partition(".")
+        if not hasattr(getattr(litegrip, owner, None), attr):
+            missing.append(path)
+    return missing
+
+
+def check_sdk_api(litegrip) -> None:
+    """缺必需接口就带着「该用哪份 SDK」退出（``SystemExit``）。
+
+    **不保留降级路径**：没有这些接口，要么只能去够 SDK 的内部实现（以前就是
+    靠 ``gripper._can._controller`` 借的），要么只能猜「这一帧是不是现在的」。
+    真机样例宁可不跑，也不拿一个猜出来的位置去算目标角——那正是一条指向别处的
+    阶跃指令的成因。
+    """
+    missing = missing_sdk_api(litegrip)
+    if not missing:
+        return
+    why = dict(REQUIRED_SDK_API)
+    directory = sdk_dir()
+    raise SystemExit(
+        "❌ 这份 litegrip SDK 缺少本仓库必须的公开接口：\n"
+        + "".join(f"     • {path} —— {why[path]}\n" for path in missing)
+        + "   litegrip **没有发布到 PyPI**（`pip install litegrip` 装到的不是这份"
+          "代码），\n"
+          "   带这些接口的版本也还没发布过。请改用本地检出：\n"
+          "     python3 -m pip install -e /path/to/lite-grip          # 或\n"
+          "     export LITEGRIP_SDK_DIR=/path/to/lite-grip\n"
+        + (f"   （这次导入到的是：{directory}）" if directory is not None else "")
+    )
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -173,6 +230,7 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
         ``litegrip.LiteGrip``（``enable=True`` 时已使能）。
     """
     litegrip = import_litegrip()
+    check_sdk_api(litegrip)   # 缺公开接口就别连——宁可现在停，也别在循环里才发现
 
     print(f"[真机] 连接 {args.channel} · can_id={args.can_id:#04x} · "
           f"mst_id={args.mst_id:#04x}")
@@ -205,8 +263,11 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
         raise SystemExit(f"❌ 初始化真机失败：{exc}") from exc
 
     cfg = gripper.config
+    # kp/kd 一起打出来：它们是标定文件里的值（也是保持帧的刚度），改了标定之后
+    # 「手感怎么变了」这个问题，第一件要看的就是这两个数。
     print(f"[真机] 已使能 · 行程 {cfg.max_stroke_mm:.1f} mm（SDK 刻度）"
-          f" · rad_to_mm={cfg.rad_to_mm:.2f}")
+          f" · rad_to_mm={cfg.rad_to_mm:.2f}"
+          f" · kp={cfg.kp:g} kd={cfg.kd:g}")
     return gripper
 
 
@@ -267,73 +328,83 @@ def rad_to_fraction(gripper, position_rad: float) -> float:
 #: 也是等 50 ms，这里对齐它。
 FRESH_WAIT_S = 0.05
 
-#: 只读路径（``--status``）等一帧的时间 [s]：那条路径自己不发帧，得先请电机回
-#: 一帧，所以给得比 :data:`FRESH_WAIT_S` 宽。
+#: 只读路径（``--status``）等一帧的时间 [s]：那条路径没有别人的帧可等（不使能
+#: → 电机不主动发帧），得先发一帧**只读的** 0xCC 请它回话，所以给得比
+#: :data:`FRESH_WAIT_S` 宽。
 STATUS_WAIT_S = 0.5
 
 
-def request_status_frame(gripper) -> bool:
-    """请电机主动回一帧状态（DM 的 ``0xCC`` 刷新，**不改变电机输出**）。
+def request_status_frame(gripper, timeout_s: float = FRESH_WAIT_S) -> bool:
+    """请电机主动回一帧状态（``LiteGrip.refresh_status``：0xCC，**不改变输出**）。
 
-    SDK 没把这件事包成公开方法，只有 ``LiteGripCAN`` 内部的
-    ``controller.refresh_status``。所以这里借内部接口，而且**拿不到就当没有**：
-    SDK 哪天改了结构，这里退回「只 poll」，不会把调用方带崩。
+    SDK 把它做成了公开方法，而且它**自己就把等待做完了**：发一帧 0xCC 刷新请求，
+    然后等到真的收到一帧新的状态帧为止。所以这里只是把「传输层出错也算没有帧」
+    包住，让调用方拿到一个布尔值——**不再额外 poll**：同一个时间预算花两遍，等于
+    把主循环的最坏停顿翻倍。
 
     为什么需要它：**没使能的电机不会自己发帧**，光 poll 永远等不到状态帧，于是
     ``get_state()`` 返回的是 ``MotorState._position`` 的初值 ``0.0``——那不是
     「夹爪在 0 弧度」，是「从没读到过」。只读诊断想看真实位置，就得主动要一帧
     （实测：电机答 0xCC 时读到 −0.370 rad，而缓存说是 0.0）。
 
+    Args:
+        timeout_s: 最多等多久 [s]。默认沿用 :data:`FRESH_WAIT_S`，与
+            ``get_state(wait=True)`` 的 50 ms 对齐；``--status`` 那条路用
+            :data:`STATUS_WAIT_S`。
+
     Returns:
-        True = 请求已发出（不代表电机回了帧），False = 这个 SDK 发不了。
+        True = ``timeout_s`` 内确实收到了一帧**新**状态帧。False = 没收到——电机
+        没答、总线出错，对调用方是同一件事：**拿不到新鲜读数，不许下发**。
     """
-    can = getattr(gripper, "_can", None)
-    controller = getattr(can, "_controller", None)
-    motor = getattr(can, "_motor", None)
-    if controller is None or motor is None:
-        return False
-    refresh = getattr(controller, "refresh_status", None)
-    if refresh is None:
-        return False
     try:
-        refresh(motor)
-    except Exception:      # 传输层没起来等等，一律当作「没有这个能力」
+        return bool(gripper.refresh_status(timeout_s=timeout_s))
+    except Exception:      # 传输层掉了等等：没有帧就是没有帧，别把调用方带崩
         return False
-    return True
 
 
 def fresh_state(gripper, timeout_s: float = FRESH_WAIT_S, *, request: bool = False):
     """等到一帧**新**的状态帧再读缓存；等不到返回 ``None``。
 
-    这是本仓库读真机位置的正确入口（02/03 都用它），因为「读到的位置是不是
-    *现在*的」这件事，SDK 的公开接口里只有 :meth:`LiteGrip.poll` 能回答：
+    这是本仓库读真机位置的正确入口（02/03 都用它）。「这份位置是不是*现在*的」
+    这件事，SDK 的公开接口里有**两个互补**的回答，这里两道门都过才算数：
 
-    * ``get_state()`` 把 ``update_state()`` 的返回值丢掉了，看不出有没有等到帧；
-    * ``GripperState.timestamp`` 是本机时钟 ``time.time()``，不是帧的时间戳，
-      所以拿到快照也看不出它有多旧；
-    * poll 返回 True 的含义就是「刚收到的这一帧是我们电机的状态帧」（读寄存器
-      的应答不算），正是需要的信号。
+    * :meth:`LiteGrip.poll` —— True 表示「刚收到的这一帧是我们电机的状态帧」
+      （读寄存器的应答不算）。它回答「**刚**有没有帧」；
+    * ``GripperState.has_data`` / ``is_stale`` / ``data_age_s`` —— 这份快照到底
+      有没有被数据支撑。它回答「**这份快照**是不是量出来的」。
+
+    为什么要两道：``data_age_s`` 量的是「距上次**读到**帧」，时间戳在 SDK 的
+    transport 里打，滞留在接收队列里的旧帧读出来照样显得新鲜（SDK 自己把这条标了
+    「待查」）；而 ``poll`` 信任的是 SDK 对「状态帧」的判定。合起来才是「这一帧
+    是现在的」。
 
     为什么非要问这一句：缓存里可能是 ``MotorState._position`` 的初值 ``0.0``，
     或者一个冻结的旧值。拿它当「现在的位置」去算目标角和斜坡时长，算出来的是一
-    条指向别处的**阶跃**指令——电机按 kp=100 去追一个不存在的误差，就是「一开
-    夹爪就起飞」的形态。所以拿不到新鲜读数时，调用方应当**拒绝下发**，而不是
-    猜一个值。
+    条指向别处的**阶跃**指令——电机按标定里的 ``kp``（SDK 默认 100 Nm/rad）去追
+    一个不存在的误差，就是「一开夹爪就起飞」的形态。所以拿不到新鲜读数时，调用方
+    应当**拒绝下发**，而不是猜一个值。
 
     Args:
         timeout_s: 最多等多久 [s]。
-        request: 等之前先发一帧只读的 ``0xCC`` 请求，见
+        request: 等之前先发一帧只读的 ``0xCC`` 请求并等它回，见
             :func:`request_status_frame`——电机没在主动发帧时（未使能、或者
-            没人喂帧）才需要。
+            没人喂帧）才需要。这条路径**不再**额外 poll：``refresh_status`` 自己
+            就把这个预算花完了。
 
     Returns:
         ``GripperState``；``timeout_s`` 内没有新的状态帧则 ``None``。
     """
     if request:
-        request_status_frame(gripper)
-    if not gripper.poll(timeout_s=timeout_s):
+        if not request_status_frame(gripper, timeout_s=timeout_s):
+            return None
+    elif not gripper.poll(timeout_s=timeout_s):
         return None
-    return gripper.get_state(wait=False)
+    state = gripper.get_state(wait=False)
+    if not state.has_data or state.is_stale:
+        # 来了帧，但这份快照不是「现在」的（从没被数据支撑过，或者已经过期）。
+        # 少发一帧不会让电机乱动，拿它算目标会。
+        return None
+    return state
 
 
 def status_line(

@@ -30,13 +30,15 @@ TIMEOUT_S = 180.0
 NOWHERE = "nosuchcan0"
 
 
-def run(script: Path, *args: str) -> subprocess.CompletedProcess:
+def run(script: Path, *args: str, env: dict | None = None
+        ) -> subprocess.CompletedProcess:
     """Run an example the way a user would: as a script, from the repo root."""
-    env = {**os.environ, "LITEGRIP_PYBULLET_REEXEC": "1"}  # no re-exec under test
+    # no re-exec under test; `env` lets a test point the SDK discovery elsewhere
+    merged = {**os.environ, "LITEGRIP_PYBULLET_REEXEC": "1", **(env or {})}
     return subprocess.run(
         [sys.executable, str(script), *args],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=TIMEOUT_S,
-        env=env,
+        env=merged,
     )
 
 
@@ -243,6 +245,51 @@ class TestExample03WithoutHardware:
         text = output_of(result)
         assert result.returncode == 1
         if "找不到真机 SDK" in text:
-            assert "pip install litegrip" in text
+            # `pip install litegrip` is not the answer — it is not on PyPI — so
+            # the message must not offer it as one.
+            assert "LITEGRIP_SDK_DIR" in text
+            assert "pip install -e" in text
+            assert "没有发布到 PyPI" in text
         else:
             assert NOWHERE in text  # SDK present: it got as far as the interface
+
+
+class TestSdkWithoutTheRequiredApi:
+    """An SDK that imports but cannot answer "is this reading current?" stops
+    the examples at startup — naming the missing member and where to get one.
+
+    This is the failure mode that used to be silent: the examples reached into
+    ``gripper._can._controller`` for the 0xCC hook, so an SDK without the public
+    API still "worked" right up until a guess about a measured position became a
+    step command.  Exercised with a throwaway checkout so it runs in CI, where
+    no SDK is installed at all.
+    """
+
+    @pytest.fixture
+    def bare_sdk(self, tmp_path) -> dict:
+        """An importable ``litegrip`` package with none of the required API."""
+        package = tmp_path / "litegrip"
+        package.mkdir()
+        # Enough to import: 02/03 only build LiteGrip objects after the check.
+        (package / "__init__.py").write_text(
+            "class LiteGrip:\n"
+            "    pass\n"
+            "\n"
+            "class GripperState:\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+        return {"LITEGRIP_SDK_DIR": str(tmp_path)}
+
+    @pytest.mark.parametrize("script", [EXAMPLE_02, EXAMPLE_03],
+                             ids=lambda p: p.name)
+    def test_it_stops_before_connecting(self, script, bare_sdk):
+        result = run(script, "--channel", NOWHERE, "--duration", "1",
+                     env=bare_sdk)
+        assert result.returncode == 1, output_of(result)
+        text = output_of(result)
+        assert "缺少本仓库必须的公开接口" in text
+        assert "LiteGrip.refresh_status" in text
+        assert "GripperState.data_age_s" in text
+        # ...and it never got as far as the bus, so nothing was transmitted.
+        assert NOWHERE not in text

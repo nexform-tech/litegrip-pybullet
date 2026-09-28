@@ -73,21 +73,12 @@ class FakeClock:
         self.now += dt
 
 
-class FakeController:
-    """The SDK's internal 0xCC hook, recording what it was asked to do."""
-
-    def __init__(self) -> None:
-        self.refreshes = 0
-
-    def refresh_status(self, motor) -> None:
-        self.refreshes += 1
-
-
 class FakeGripper:
     """Stands in for a connected, enabled ``LiteGrip``.
 
-    ``answer`` decides, per poll, whether a status frame arrived — that is the
-    only public signal saying the cached position is current.
+    ``answer`` decides, per attempt, whether a status frame arrived — that is
+    the public signal saying the cached position is current, and a bus that has
+    gone quiet gives the same answer to a poll and to a 0xCC request.
     """
 
     def __init__(self, position_rad: float = START_RAD, answer=None) -> None:
@@ -95,11 +86,9 @@ class FakeGripper:
         self.answer = answer or (lambda n: True)
         self.polls = 0
         self.frames: list[dict] = []
+        self.refreshes: list[float] = []
         self.zero_gravity_calls: list[str] = []
         self.disconnected = False
-        self.controller = FakeController()
-        self._can = SimpleNamespace(_controller=self.controller,
-                                    _motor=object())
         self.config = SimpleNamespace(
             pos_closed_rad=POS_CLOSED_RAD,
             pos_open_rad=POS_OPEN_RAD,
@@ -110,9 +99,16 @@ class FakeGripper:
         )
 
     # ── the LiteGrip surface example 03 uses ────────────────────────────
-    def poll(self, timeout_s: float = 0.0) -> bool:
+    def _answers(self) -> bool:
         self.polls += 1
         return bool(self.answer(self.polls))
+
+    def poll(self, timeout_s: float = 0.0) -> bool:
+        return self._answers()
+
+    def refresh_status(self, timeout_s: float = 0.5) -> bool:
+        self.refreshes.append(timeout_s)
+        return self._answers()
 
     def get_state(self, wait: bool = True):
         return SimpleNamespace(
@@ -120,6 +116,9 @@ class FakeGripper:
             position_mm=(POS_CLOSED_RAD - self.position_rad) * RAD_TO_MM,
             force_n=0.0,
             velocity_rad_s=0.0,
+            data_age_s=0.0,
+            has_data=True,
+            is_stale=False,
             is_moving=False,
             error_code=1,
             is_error=False,
@@ -234,7 +233,7 @@ class TestMirroring:
     def test_passive_sends_no_frame_at_all(self, monkeypatch):
         run = _run(monkeypatch, passive=True, steps=40)
         assert run.gripper.frames == []
-        assert run.gripper.controller.refreshes == 0, \
+        assert run.gripper.refreshes == [], \
             "--passive 说好了一帧都不发，0xCC 请求也是 CAN 帧"
 
 
@@ -258,7 +257,7 @@ class TestItWillNotCommandAnUnmeasuredPosition:
         """Waiting forever is not an option either: an unfed motor stays quiet."""
         gripper = FakeGripper(answer=lambda n: False)
         run = _run(monkeypatch, gripper=gripper, steps=40)
-        assert run.gripper.controller.refreshes > 0, \
+        assert run.gripper.refreshes, \
             "读不到帧也不叫它一声——那就永远读不到了"
 
     def test_it_holds_once_the_motor_starts_answering(self, monkeypatch):

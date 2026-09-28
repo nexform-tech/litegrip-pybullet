@@ -176,24 +176,30 @@ class TestRadToFraction:
         )
 
 
-class FakeController:
-    """Records what the 0xCC request path touches."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
-
-    def refresh_status(self, motor) -> None:
-        self.calls.append(("refresh_status", motor))
-
-
 class FakeGrip:
-    """Just the ``LiteGrip`` surface :func:`_common.fresh_state` uses."""
+    """Just the ``LiteGrip`` surface the ``_common`` helpers use.
 
-    def __init__(self, answering: bool = True, can=None) -> None:
+    ``data_age_s`` is the SDK's public freshness signal (``inf`` = no frame has
+    ever been decoded); the two properties are derived from it exactly as the
+    SDK derives them, so a test can put the snapshot on either side of
+    ``STALE_AFTER_S`` by choosing one number.
+    """
+
+    #: ``litegrip.models.STALE_AFTER_S``: older than this reads as stale.
+    STALE_AFTER_S = 0.5
+
+    def __init__(self, answering: bool = True,
+                 data_age_s: float = 0.0) -> None:
         self.answering = answering
-        self._can = can
+        self.data_age_s = data_age_s
+        self.refreshes: list[float] = []
         self.polls: list[float] = []
         self.reads = 0
+        self.frames: list[dict] = []
+
+    def refresh_status(self, timeout_s: float = 0.5) -> bool:
+        self.refreshes.append(timeout_s)
+        return self.answering
 
     def poll(self, timeout_s: float = 0.0) -> bool:
         self.polls.append(timeout_s)
@@ -201,21 +207,26 @@ class FakeGrip:
 
     def get_state(self, wait: bool = True):
         self.reads += 1
-        return SimpleNamespace(position_rad=0.42)
+        return SimpleNamespace(
+            position_rad=0.42,
+            data_age_s=self.data_age_s,
+            has_data=self.data_age_s != float("inf"),
+            is_stale=self.data_age_s > self.STALE_AFTER_S,
+        )
 
-
-def _fake_can(controller=None, motor=None):
-    return SimpleNamespace(_controller=controller or FakeController(),
-                           _motor=motor or object())
+    def send_mit_frame(self, q, kp, kd, dq=0.0, tau=0.0) -> bool:
+        """Any control frame is recorded, so a read-only path can prove it sent
+        none."""
+        self.frames.append(dict(q=q, kp=kp, kd=kd, dq=dq, tau=tau))
+        return True
 
 
 class TestFreshState:
     """``fresh_state`` is the only sanctioned way to read the real position.
 
-    ``get_state()`` throws away ``update_state()``'s return value and stamps the
-    snapshot with the *local* clock, so nothing in the public API says whether the
-    cached position is current.  ``poll()`` does: True means a status frame for
-    this motor just arrived.
+    Two public signals have to agree before the cached position counts as a
+    reading: ``poll()`` says a status frame arrived *just now*, and the
+    snapshot's own ``has_data`` / ``is_stale`` say it is backed by data.
     """
 
     def test_a_fresh_frame_returns_the_state(self):
@@ -234,46 +245,112 @@ class TestFreshState:
 
     def test_it_can_wake_the_motor_up_first(self):
         """A motor that is not being fed never speaks; 0xCC asks it to."""
-        controller = FakeController()
-        motor = object()
-        gripper = FakeGrip(can=_fake_can(controller, motor))
-        _common.fresh_state(gripper, request=True)
-        assert controller.calls == [("refresh_status", motor)]
+        gripper = FakeGrip()
+        _common.fresh_state(gripper, timeout_s=1.0, request=True)
+        assert gripper.refreshes == [1.0]
         assert gripper.reads == 1
 
-    def test_the_wake_up_call_is_read_only(self):
-        """``refresh_status`` is documented "does not change motor output" — the
-        fake records only that one call, so no control frame can slip in."""
-        controller = FakeController()
-        gripper = FakeGrip(can=_fake_can(controller))
+    def test_waking_the_motor_up_does_not_spend_the_budget_twice(self):
+        """``refresh_status`` does its own waiting; polling again afterwards
+        would double the worst-case stall of every caller that asks for a
+        frame."""
+        gripper = FakeGrip()
         _common.fresh_state(gripper, request=True)
-        assert [name for name, _ in controller.calls] == ["refresh_status"]
+        assert gripper.polls == [], "叫醒电机之后又 poll 了一次"
+
+    def test_the_wake_up_call_is_read_only(self):
+        """``refresh_status`` is documented "does not change motor output" — no
+        control frame may be sent on the way to asking for one."""
+        gripper = FakeGrip()
+        _common.fresh_state(gripper, request=True)
+        assert gripper.refreshes and gripper.frames == []
 
     def test_no_request_is_sent_unless_asked_for(self):
-        controller = FakeController()
-        gripper = FakeGrip(can=_fake_can(controller))
+        gripper = FakeGrip()
         _common.fresh_state(gripper)
-        assert controller.calls == []
+        assert gripper.refreshes == []
 
-    @pytest.mark.parametrize("can", [
-        None,                                             # 没连上
-        SimpleNamespace(),                                # 没有 _controller/_motor
-        SimpleNamespace(_controller=object(), _motor=object()),   # 老 SDK 没这方法
-    ])
-    def test_it_degrades_quietly_when_the_sdk_has_no_hook(self, can):
-        """Borrowing an internal must never be able to break the caller."""
-        gripper = FakeGrip(can=can)
-        assert _common.fresh_state(gripper, request=True) is not None
-        assert _common.request_status_frame(gripper) is False
+    def test_a_frame_the_sdk_calls_stale_is_refused(self):
+        """``poll`` said a frame arrived, but the snapshot says it is old — the
+        two disagree, and the reading must lose."""
+        gripper = FakeGrip(data_age_s=FakeGrip.STALE_AFTER_S + 0.1)
+        assert _common.fresh_state(gripper) is None
+        assert gripper.reads == 1, "该读的还是读了，只是没敢用"
+
+    def test_a_snapshot_with_no_data_behind_it_is_refused(self):
+        """``inf`` is the SDK's "never received a frame" — the same
+        ``MotorState._position = 0.0`` that this whole path exists to stop from
+        being commanded."""
+        gripper = FakeGrip(data_age_s=float("inf"))
+        assert _common.fresh_state(gripper) is None
 
     def test_a_failing_transport_is_not_fatal(self):
-        class Exploding(FakeController):
-            def refresh_status(self, motor):
+        """A CAN error must read as "no frame", never as "here is the cache"."""
+        class Exploding(FakeGrip):
+            def refresh_status(self, timeout_s: float = 0.5) -> bool:
                 raise OSError("CAN 掉线了")
 
-        gripper = FakeGrip(can=_fake_can(Exploding()))
+        gripper = Exploding()
         assert _common.request_status_frame(gripper) is False
-        assert _common.fresh_state(gripper, request=True) is not None
+        assert _common.fresh_state(gripper, request=True) is None
+        assert gripper.reads == 0, "传输层出错之后还是把缓存当读数了"
+
+
+def _sdk(*absent: str) -> SimpleNamespace:
+    """A stand-in for the ``litegrip`` module, lacking the named members.
+
+    Built fresh on every call out of exactly the members the check looks for:
+    the check is a ``hasattr`` walk, so an absent one has to be genuinely
+    absent, and deleting it off a shared class would leak into other tests.
+    """
+    drop = set(absent)
+    grip: dict = {}
+    state: dict = {}
+    for path, _why in _common.REQUIRED_SDK_API:
+        if path in drop:
+            continue
+        owner, _, attr = path.partition(".")
+        (grip if owner == "LiteGrip" else state)[attr] = True
+    return SimpleNamespace(LiteGrip=SimpleNamespace(**grip),
+                           GripperState=SimpleNamespace(**state))
+
+
+class TestSdkApiCheck:
+    """The examples refuse to run on an SDK that cannot answer "is this reading
+    current?" — loudly, at startup, naming the member and where to get one.
+
+    Silently degrading is what the previous version did (it borrowed
+    ``gripper._can._controller``), and a guess about a measured position is the
+    input to a step command.
+    """
+
+    def test_a_complete_sdk_passes(self):
+        sdk = _sdk()
+        assert _common.missing_sdk_api(sdk) == []
+        _common.check_sdk_api(sdk)          # must not raise
+
+    def test_every_missing_member_is_named(self):
+        sdk = _sdk(*[path for path, _ in _common.REQUIRED_SDK_API])
+        assert _common.missing_sdk_api(sdk) == [
+            path for path, _ in _common.REQUIRED_SDK_API]
+
+    @pytest.mark.parametrize("absent", [
+        "LiteGrip.refresh_status",
+        "GripperState.data_age_s",
+        "GripperState.has_data",
+        "GripperState.is_stale",
+    ])
+    def test_one_missing_member_is_reported_alone(self, absent):
+        assert _common.missing_sdk_api(_sdk(absent)) == [absent]
+
+    def test_it_says_which_sdk_to_use(self):
+        with pytest.raises(SystemExit) as excinfo:
+            _common.check_sdk_api(_sdk("LiteGrip.refresh_status"))
+        message = str(excinfo.value)
+        assert "LiteGrip.refresh_status" in message
+        assert "PyPI" in message, "没说明这个包不在 PyPI 上，用户会去 pip install"
+        assert "LITEGRIP_SDK_DIR" in message
+        assert "pip install -e" in message
 
 
 class TestStatusLine:

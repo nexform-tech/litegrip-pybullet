@@ -78,16 +78,6 @@ class FakeClock:
         self.now += dt
 
 
-class FakeController:
-    """The one SDK internal ``request_status_frame`` (0xCC) reaches for."""
-
-    def __init__(self) -> None:
-        self.refreshes = 0
-
-    def refresh_status(self, motor) -> None:
-        self.refreshes += 1
-
-
 class FakeGripper:
     """Stands in for a connected, enabled ``LiteGrip``.
 
@@ -100,15 +90,14 @@ class FakeGripper:
         self.position_rad = position_rad
         self.error_code = error_code
         #: False = the motor is not sending status frames (a wedged motor, a
-        #: deaf master, a second program on the bus).  ``poll`` is the only
-        #: public way to tell that apart from a live one.
+        #: deaf master, a second program on the bus).  ``poll`` and
+        #: ``refresh_status`` are the public ways to tell that apart from a live
+        #: one, and neither can answer on a bus that carries nothing.
         self.answering = answering
         self.frames: list[dict] = []
         self.stopped = False
+        self.refreshes: list[float] = []
         self.disconnected = False
-        self.controller = FakeController()
-        self._can = SimpleNamespace(_controller=self.controller,
-                                    _motor=object())
         self.config = SimpleNamespace(
             pos_closed_rad=POS_CLOSED_RAD,
             pos_open_rad=POS_OPEN_RAD,
@@ -124,12 +113,22 @@ class FakeGripper:
         """``LiteGrip.poll``: True = a *new* status frame arrived just now."""
         return self.answering
 
+    def refresh_status(self, timeout_s: float = 0.5) -> bool:
+        """``LiteGrip.refresh_status``: sends 0xCC, then waits for the reply."""
+        self.refreshes.append(timeout_s)
+        return self.answering
+
     def get_state(self, wait: bool = True):
         return SimpleNamespace(
             position_rad=self.position_rad,
             position_mm=(POS_CLOSED_RAD - self.position_rad) * RAD_TO_MM,
             force_n=0.0,
             velocity_rad_s=0.0,
+            # A frame just arrived (``answering``), so the snapshot is backed by
+            # data and young — the two signals ``fresh_state`` cross-checks.
+            data_age_s=0.0,
+            has_data=True,
+            is_stale=False,
             is_moving=False,
             error_code=self.error_code,
             is_error=self.error_code not in (0, 1),
@@ -309,10 +308,13 @@ class TestEnterDispatch:
 class PollSchedule(FakeGripper):
     """A gripper whose status frames follow a schedule.
 
-    ``answer`` gets the poll count and decides whether that frame arrived, so a
-    test can say "answers for a while, then goes quiet" — the dangerous case,
+    ``answer`` gets the attempt count and decides whether that frame arrived, so
+    a test can say "answers for a while, then goes quiet" — the dangerous case,
     because the cached position is then a *plausible old* value rather than the
     SDK's 0.0, and nothing looks wrong until the value is used.
+
+    Both ways of asking share the count, because they are the same question: a
+    bus that has gone quiet answers neither a poll nor a 0xCC request.
     """
 
     def __init__(self, answer, **kwargs) -> None:
@@ -320,9 +322,16 @@ class PollSchedule(FakeGripper):
         self.answer = answer
         self.polls = 0
 
-    def poll(self, timeout_s: float = 0.0) -> bool:
+    def _answers(self) -> bool:
         self.polls += 1
         return bool(self.answer(self.polls))
+
+    def poll(self, timeout_s: float = 0.0) -> bool:
+        return self._answers()
+
+    def refresh_status(self, timeout_s: float = 0.5) -> bool:
+        self.refreshes.append(timeout_s)
+        return self._answers()
 
 
 class TestItWillNotActOnAnUnmeasuredPosition:
@@ -424,7 +433,8 @@ class TestStatusReportsMeasuredValues:
     def test_it_asks_for_a_frame_before_printing_a_position(self, monkeypatch, capsys):
         gripper = FakeGripper(position_rad=POS_OPEN_RAD + 0.3)
         code, out = self._status(monkeypatch, capsys, gripper)
-        assert gripper.controller.refreshes == 1, "没有先请它回一帧就读了缓存"
+        assert gripper.refreshes == [ex02.STATUS_WAIT_S], \
+            "没有先请它回一帧就读了缓存（或者没用 --status 那个更宽的等待预算）"
         expected = ex02.rad_to_fraction(gripper, gripper.position_rad) * 100
         assert f"{expected:5.1f}%" in out
         assert "6.63 mm" not in out, "又把「从没读到过」的 0.0 当成位置打印了"
