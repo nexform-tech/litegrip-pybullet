@@ -92,35 +92,50 @@ The grip in step 3 is real friction, not a ledge: the part is held in mid-air an
 
 ### 02 — simulation drives the gripper
 
-You set the target in the PyBullet window; pressing Enter sends it.
+The window is two things at once: three sliders that *command* the hardware, and
+a mirror that *shows* where the hardware is. Enabling the motor does not move
+anything — the example reads the position you are already at, shows it in the
+window and holds there, and the hardware only moves once you drag a slider.
 
-1. Drag the **opening** slider. The simulated jaws follow it live — that is a
-   *preview*, and it obeys the same 85 mm/s limit, so the speed you see is the
-   speed the hardware will move at. The hardware has not moved yet.
-2. Drag the **force** slider. It becomes the feed-forward torque sent with the
-   frame.
-3. Press **Enter** or **Space** to send. The hardware **ramps** toward the target
-   at 200 Hz — slow enough by default to keep the fingers at or under 85 mm/s
-   (`--duration` can ask for slower, never for faster) — then holds and pushes.
-   The simulation shows the *commanded* opening while the hardware's measured
-   opening is displayed next to it; the gap between the two is the tracking
-   error, and it stays open while the fingers are blocked by a part — which is
-   how you tell you have gripped something.
+1. Drag the **opening** slider. The drag *is* the command: there is no send key.
+   The hardware ramps toward the target at 200 Hz, and the simulated jaws mirror
+   its **measured** position, so they lag the slider rather than jumping to it.
+   That gap is the tracking error, and it stays open while the fingers are
+   blocked by a part — which is how you tell you have gripped something.
+2. Drag the **speed** slider at any time, before or mid-move. It caps how fast
+   the position target may grow, as a percentage of the fingers' rated 85 mm/s.
+   100 % means "at most 85 mm/s"; values above 100 % are treated as 100 %.
+3. Drag the **force** slider. It becomes the feed-forward torque sent with the
+   frame, and it is only applied in the closing direction (a grip force on an
+   opening move would fight the motor) and only once the target is reached.
 4. Press **Esc** or **Q** to quit. Frame sending stops and the motor is
    **disabled** (0xFD): the fingers go limp and a gripped part will drop, but no
    communication-loss fault is left latched on the motor.
 
+> **There is no confirmation step.** A slider value *is* a command, so brushing a
+> slider with the mouse is a real command to a real motor. Park the pointer away
+> from the sliders when you are not driving, and expect the gripper to move the
+> moment you touch the opening slider.
+
+Between drags the example keeps streaming the current position at 200 Hz. That is
+not a keep-alive nicety: an enabled motor that hears nothing for about 0.9 s
+latches a communication-loss fault (0xD), so standing still is the thing that
+fails.
+
 ```bash
 python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
 python3 examples/02_sim_to_real.py --dry-run         # window only, never touches CAN
-python3 examples/02_sim_to_real.py                   # can0, 10 N, automatic speed
-python3 examples/02_sim_to_real.py --force 20 --duration 2
-python3 examples/02_sim_to_real.py --channel can1    # a different CAN port
+python3 examples/02_sim_to_real.py --speed 40        # start the speed slider at 40 %
+python3 examples/02_sim_to_real.py --force 20 --channel can1
 ```
 
 `--calib` is required on every run, `--dry-run` included; without it the example
 lists the calibration candidates and asks (see
 [Before you drive the hardware](#before-you-drive-the-hardware)).
+
+`--dry-run` runs the same loop with no CAN traffic and no measured position, so
+the window follows the *commanded* opening instead of mirroring the hardware and
+the status line says `dry-run` to remind you.
 
 `--headless` is refused: the sliders are the input device, and a DIRECT
 connection has no sliders. Use 01 for a headless run.
@@ -140,6 +155,10 @@ The ramp is kept because it does not depend on that number: it bounds how far th
 *position target* may jump in one frame, whatever `kp` is configured to. Each
 frame advances one tick from where the motor *is*, so a single frame demands well
 under the rated torque. The SDK's own `goto_rad` ramps for the same reason.
+
+This is also why the speed limit is a limit on the *target*, not on the slider.
+Yanking the opening slider from fully open to fully closed still costs the motor
+one bounded increment per frame — the drag's own speed never reaches the bus.
 
 #### If a wedged gripper reads but won't move
 
@@ -276,6 +295,11 @@ limp on exit and the fingers may drift under their own weight.
 Both hardware examples print a safety banner and are meant to be run with the
 gripper in hand or clamped to a bench, **with the travel clear**, and the power
 switch within reach. The first run of 02 should be `--dry-run`.
+
+A first real run of 02 looks like nothing happening, and that is correct: the
+motor is enabled, the window shows where the gripper already is, and it stays
+there until you drag the opening slider. Keep the fingers clear the whole time —
+the motion starts on the drag, not on a keypress.
 
 Confirm the CAN interface before anything moves:
 
