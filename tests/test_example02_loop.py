@@ -59,10 +59,12 @@ KD = 2.0
 #: The motor is rated around 10 Nm; a sustained command past that stalls it.
 MOTOR_RATED_NM = 10.0
 
-#: The DM4310's CAN watchdog, as ``TIMEOUT`` was last read on this machine (it
-#: has also read 0, i.e. off — the tests care that the cadence beats the value,
-#: not that the hardware currently holds it).
-WATCHDOG_S = 8.0
+#: How long an enabled motor can go silent before it latches the
+#: communication-loss fault, as measured on this hardware (the SDK's own
+#: number).  The motor's ``TIMEOUT`` register says 8000 ms — and has also said 0
+#: — which does not match the measurement, so the cadence is held against the
+#: measured value rather than the register.
+WATCHDOG_S = 0.9
 
 
 class FakeClock:
@@ -471,13 +473,28 @@ class TestStatusReportsMeasuredValues:
         assert "✅ 没有故障" not in out
 
     def test_the_watchdog_registers_read_value_is_what_gets_reported(self, monkeypatch, capsys):
-        """The stored 8000 ms is not this machine's current truth: the register
-        is read live, and 0 (watchdog off) must not be reported as armed."""
-        _, live = self._status(monkeypatch, capsys, FakeGripper(), timeout_ms=0.0)
-        assert "通信超时保护 = 0" in live
-        _, stored = self._status(monkeypatch, capsys, FakeGripper(),
-                                 timeout_ms=8000.0)
-        assert "通信超时保护 = 8000" in stored
+        """The register is read live, so both of its values come out as read.
+
+        It used to be reported as *the* timeout: "hold this many ms and the
+        motor latches".  That was wrong — the register has read 8000 and 0, and
+        neither matches the ~0.9 s measured on this hardware — so the reading is
+        printed together with the measurement it contradicts.
+        """
+        _, off = self._status(monkeypatch, capsys, FakeGripper(), timeout_ms=0.0)
+        assert "通信超时保护（TIMEOUT, RID 9）= 0" in off
+        _, armed = self._status(monkeypatch, capsys, FakeGripper(),
+                                timeout_ms=8000.0)
+        assert "通信超时保护（TIMEOUT, RID 9）= 8000" in armed
+
+    def test_neither_register_value_is_passed_off_as_the_trip_time(self, monkeypatch, capsys):
+        """Whatever the register says, the reported trip time is the measured
+        one — a stale register must not become the operative number again."""
+        for timeout_ms in (0.0, 8000.0):
+            _, out = self._status(monkeypatch, capsys, FakeGripper(),
+                                  timeout_ms=timeout_ms)
+            assert "8000 ms 就锁" not in out
+            assert f"静默约 {ex02.MEASURED_COMM_LOSS_S:g} s 就锁" in out, \
+                "没把实测的闩锁时间说出来，读者只能拿寄存器当依据"
 
 
 class TestDescribingAFault:
