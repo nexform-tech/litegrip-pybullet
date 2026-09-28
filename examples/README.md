@@ -145,23 +145,30 @@ The fault is latched: it will not clear itself until the gripper is power-cycled
 | Code | Meaning | What triggers it |
 | --- | --- | --- |
 | 0x9 / 0xA | under-voltage / over-current | a step command: ~185 Nm in one frame on a ~10 Nm motor |
-| **0xD** | **communication loss** — the SDK's `describe_error` does not know this code, so the example names it itself (`EXTRA_ERRORS`) | 8 s with no frame received — including "just watching with the window open" |
+| **0xD** | **communication loss** — the SDK's `describe_error` does not know this code, so the example names it itself (`EXTRA_ERRORS`) | no frame for as long as `TIMEOUT` (RID 9) says — including "just watching with the window open" |
 
 0xD is the `TIMEOUT` register's CAN watchdog: **idling is itself the fault
 cause.** This example therefore keeps sending hold frames at 200 Hz through its
 idle periods (target = measured position, zero feed-forward, no motion
 commanded) — see `IdleKeeper`. Earlier revisions sent nothing, so the quiet
 stretch after `enable()`'s priming frame — PyBullet starting up plus a few
-seconds of looking at the window — went past 8000 ms and wedged the motor. That,
-not the ramp, was the main cause of "simulation can read the gripper but not
-control it."
+seconds of looking at the window — went past the watchdog and wedged the motor.
+That, not the ramp, was the main cause of "simulation can read the gripper but
+not control it."
 
 `--status` prints the register rather than leaving you to guess:
 
 ```text
-   ⏱  通信超时保护 = 8000 ms：连续这么久收不到帧，电机会锁进通信丢失故障
-      （位置照读、指令不执行、红灯闪）
+   ⏱  通信超时保护 = 8000 ms：连续这么久收不到帧，电机会锁进通信丢失故障（位置照读、指令不执行、红灯闪）。
+      样例 02/03 空闲时也在持续发帧，就是为了不让它到期；
+      只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
 ```
+
+Read it instead of remembering it: the same machine reported **8000 ms** on
+2026-09-24 and **0 ms** on 2026-09-28, where `= 0` means the watchdog is off on
+that motor and silence no longer latches 0xD. The examples keep feeding either
+way — a different motor, or someone editing that register, changes the
+conclusion.
 
 A **second master** on the same bus makes the symptom messier still: the two
 streams fight and neither side wins. Before running a hardware example, check
@@ -207,11 +214,12 @@ python3 examples/03_real_to_sim.py --duration 10    # stop after 10 s
 
 #### Why "just watching" still has to send frames
 
-The motor's `TIMEOUT` register (RID 9, measured **8000 ms** on this machine) is a
-CAN watchdog: **that long with no frame received latches a communication-loss
-fault** — again a blinking red LED, positions that still read, and commands that
-are silently ignored. A few seconds of watching the PyBullet window is enough to
-wedge the gripper.
+The motor's `TIMEOUT` register (RID 9) is a CAN watchdog: **that long with no
+frame received latches a communication-loss fault** — again a blinking red LED,
+positions that still read, and commands that are silently ignored. The value is
+read off the motor and it moves: **8000 ms** on 2026-09-24, **0 ms** (watchdog
+off) on 2026-09-28. When it is nonzero, a few seconds of watching the PyBullet
+window is enough to wedge the gripper.
 
 So the default mode is not read-only: it sends "**locked at the measured
 position**" hold frames at 200 Hz — target where the fingers already are, zero
@@ -222,7 +230,8 @@ stiffness and keeps the watchdog fed. To back-drive it instead, add
 Use `--passive` when a **different program** is driving the hardware: this example
 then sends no frames and disables the Z key, so the two never fight over the bus.
 The cost is that the other program has to feed the motor itself, or it latches
-after 8 s anyway. **Do not combine `--passive` with running this example alone.**
+once the watchdog expires anyway. **Do not combine `--passive` with running this
+example alone.**
 
 `--zero-gravity` (or Z) makes the gripper *soft*, so the fingers can be
 back-driven and can also sag under gravity. Support the gripper before enabling

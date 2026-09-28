@@ -94,14 +94,17 @@ causes on this hardware:
   for ~185 Nm from a ~10 Nm motor, which latches an under-voltage/over-current
   fault (0x9/0xA). Example 02 ramps like the SDK's own `goto_rad`, one tick per
   frame, so a single frame demands under 1 Nm.
-- **Idling too long**: the `TIMEOUT` register (RID 9, measured 8000 ms here) is a
-  CAN watchdog — that long with no frame received latches a communication-loss
-  fault (**0xD**, a code the SDK's `describe_error` does not yet know — the
-  example names it itself instead of reporting 未知错误). **A quiet
-  idle period is itself the fault cause**, and it was the dominant one behind
-  "simulation can read the gripper but not control it." Both examples now send
-  hold frames (target = measured position, zero feed-forward) while idle; 03's
-  `--passive` opts out of that when another program is driving the bus.
+- **Idling too long**: the `TIMEOUT` register (RID 9) is a CAN watchdog — that
+  long with no frame received latches a communication-loss fault (**0xD**, a
+  code the SDK's `describe_error` does not yet know — the example names it
+  itself instead of reporting 未知错误). **A quiet idle period is itself the
+  fault cause**, and it was the dominant one behind "simulation can read the
+  gripper but not control it." Do not trust a remembered duration — read it:
+  this machine reported 8000 ms on 2026-09-24 and 0 ms (watchdog off) on
+  2026-09-28, and `--status` prints the live value. Both examples keep sending
+  hold frames (target = measured position, zero feed-forward) while idle
+  regardless; 03's `--passive` opts out of that when another program is driving
+  the bus.
 
 Both faults are diagnosed and cleared without moving the motor via
 `examples/02_sim_to_real.py --status [--clear-fault]`.

@@ -240,17 +240,21 @@ class TestStreamRamp:
 
 
 class TestIdleKeeper:
-    """A gripper that hears nothing for TIMEOUT ms latches a comms-loss fault.
+    """A gripper that hears nothing for the watchdog interval latches a fault.
 
-    Read off the motor itself: register ``TIMEOUT`` (RID 9) = 8000, so eight
-    seconds of silence is enough to wedge it — position still readable, every
-    command ignored, LED blinking. An interactive example that only transmits
-    while a move is in flight therefore breaks the hardware by being *looked
-    at* for eight seconds. These tests pin down that the idle path keeps
-    talking, and that what it says cannot move anything.
+    Read off the motor itself: register ``TIMEOUT`` (RID 9) was 8000 ms when
+    this was written, and has since been read as 0 — the register moves, so
+    :data:`WATCHDOG_S` is the worst case the cadence has to beat, not a
+    constant of the hardware. While it is nonzero, seconds of silence are
+    enough to wedge the motor — position still readable, every command
+    ignored, LED blinking. An interactive example that only transmits while a
+    move is in flight therefore breaks the hardware by being *looked at*.
+    These tests pin down that the idle path keeps talking, and that what it
+    says cannot move anything.
     """
 
-    #: The motor's own CAN timeout, in seconds, as the hardware reports it.
+    #: The CAN timeout the keep-alive cadence has to beat, in seconds — the
+    #: value the register was last observed to hold.
     WATCHDOG_S = 8.0
 
     #: 64 Hz = 1/64 s per tick, a power of two, so every test timestamp below is

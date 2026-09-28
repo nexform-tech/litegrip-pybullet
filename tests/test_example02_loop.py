@@ -59,7 +59,9 @@ KD = 2.0
 #: The motor is rated around 10 Nm; a sustained command past that stalls it.
 MOTOR_RATED_NM = 10.0
 
-#: The DM4310's CAN watchdog, as ``TIMEOUT`` reads on this machine.
+#: The DM4310's CAN watchdog, as ``TIMEOUT`` was last read on this machine (it
+#: has also read 0, i.e. off — the tests care that the cadence beats the value,
+#: not that the hardware currently holds it).
 WATCHDOG_S = 8.0
 
 
@@ -484,8 +486,9 @@ class TestDescribingAFault:
 
 class TestItNeverLeavesTheMotorUnfed:
     """``enable()`` sends one priming frame and then stops; everything the
-    example does between that and its first loop frame is dead time, and 8 s of
-    it latches a communication-loss fault on an enabled, unattended motor."""
+    example does between that and its first loop frame is dead time, and enough
+    of it latches a communication-loss fault on an enabled, unattended motor
+    (``TIMEOUT``, RID 9 — 8000 ms when it was last read nonzero)."""
 
     def test_a_frame_goes_out_before_the_window_is_even_used(self, monkeypatch):
         run = _run(monkeypatch, steps=0)      # the window dies immediately
