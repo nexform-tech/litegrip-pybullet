@@ -34,6 +34,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# `litegrip` is not on PyPI — examples 02/03 need it from a checkout
+# (`pip install -e /path/to/lite-grip`, $LITEGRIP_SDK_DIR, or a sibling
+# lite-grip directory), and no released version carries the public API they
+# require (LiteGrip.refresh_status, GripperState.data_age_s/has_data/is_stale).
+# This extra can therefore only be satisfied by a local or org index; the real
+# guard is the startup check in examples/_common.py:check_sdk_api().
 hardware = ["litegrip>=2.2"]
 test = ["pytest>=7.0"]
 

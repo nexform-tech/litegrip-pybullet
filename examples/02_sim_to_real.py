@@ -14,15 +14,27 @@
      （200 Hz 发帧）。仿真显示的是**命令值**，真机的实测值在旁边对照——两者
      的差就是真机的跟随误差，顶住工件时这个差会一直留着，正好用来判断
      「夹到了没有」。
-  4. **Esc / Q** 退出，退出前会让真机停住（停止发帧，电机保持当前位置）。
+  4. **Esc / Q** 退出，退出前会**明确失能**（0xFD）：电机不再出力，手指会松、
+     夹着的工件会掉，但不会在电机上留下通信超时故障（原因见下）。
 
 ⚠️ 会驱动真机！第一次跑务必先 dry-run：
 
     python3 examples/02_sim_to_real.py --dry-run    # 只开窗口，绝不碰 CAN
 
+⚠️ **每次都要先选定这台夹爪的标定文件**（标定文件由上位机标定后保存得到：
+
+    litegrip-studio / litegrip-console，或 SDK 自带的 tools/gui/litegrip_gui.py
+）。
+
+不给 ``--calib`` 就会在终端里列出候选让你选；选不出来（非交互、没有候选）直接
+退出——**不会**去用 SDK 的默认标定，更不会回退出厂标定。标定的角度和毫米刻度
+是一台机器一个值，拿别人的算目标角，轻则夹不住、重则一条指令撞限位。``--dry-run``
+也要选：它虽然不碰 CAN，但走的就是这套参数。
+
 真机跑：
 
-    python3 examples/02_sim_to_real.py                # can0, 10 N, 自动速度
+    python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
+    python3 examples/02_sim_to_real.py                # 不给就当场从候选里选
     python3 examples/02_sim_to_real.py --force 20 --duration 2
     python3 examples/02_sim_to_real.py --channel can1        # 换 CAN 口
 
@@ -31,11 +43,17 @@
     python3 examples/02_sim_to_real.py --status             # 只连、只读，不发一帧
     python3 examples/02_sim_to_real.py --status --clear-fault   # 清掉锁死的故障
 
-红灯闪 + 位置照读 + 指令无效，是电机进了**锁死**的故障态（欠压/过流/过温）。
-最常见的原因是控制端把「目标」当阶跃发出去：MIT 的 kp 是位置刚度，一整段
-行程的阶跃会让电机在第一帧就要求上百牛米（额定才 10 Nm 左右），电流拉满即
-报保护。本样例现在发的是**斜坡**（见 :class:`StreamMove`），和 SDK 自己的
-``goto_rad`` 一样，不会再踩这个坑。
+红灯闪 + 位置照读 + 指令无效，是电机进了**锁死**的故障态，而 ``--status`` 打的
+那个错误码就是它的名字（0xD = 通信丢失、0x9 = 欠压、0xA = 过流、0xB/0xC = 过温
+……）。两类原因最常见：
+
+  * **没人喂帧**：使能态的电机静默约 :data:`MEASURED_COMM_LOSS_S` 就报 0xD。所以
+    空闲也得持续发帧（见 :class:`IdleKeeper`）。
+  * **一条接不住的指令**：MIT 的 kp 是位置刚度，一整段行程的阶跃会让电机在第一帧
+    就被要求输出 ``kp × 1.845 rad`` 那么大的力矩。SDK 默认 kp=100 Nm/rad，那是
+    185 Nm，而额定只有 ~10 Nm；本机标定现在是 5.0，同样的阶跃约 9 Nm。但 kp 是
+    标定文件里的一项、随时可能被改回去，所以本样例发的是**斜坡**
+    （见 :class:`StreamMove`），和 SDK 自己的 ``goto_rad`` 一样，不押在某个 kp 上。
 
 为什么要自己发帧：SDK 的 move_to()/goto_rad() 内部是 control_mit_stream()，
 它自己 sleep 5 ms 循环、不让出控制权，PyBullet 窗口会卡住、也读不到按键。
@@ -49,15 +67,20 @@ import time
 
 from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     FRESH_WAIT_S,
+    NOMINAL_STROKE_MM,
     SAFETY_BANNER,
     STATUS_WAIT_S,
     add_common_args,
     add_hardware_args,
+    calibration_summary,
+    check_calibration_values,
+    choose_calibration_file,
     fraction_to_target_rad,
     fresh_state,
     import_litegrip,
     open_real_gripper,
     rad_to_fraction,
+    read_calibration_file,
     status_line,
 )
 
@@ -92,7 +115,8 @@ def parse_args() -> argparse.Namespace:
     add_common_args(ap)
     add_hardware_args(ap)
     ap.add_argument("--dry-run", action="store_true",
-                    help="不连真机、不下发任何指令（只开窗口看流程）")
+                    help="不连真机、不下发任何指令（只开窗口看流程）；"
+                         "标定照样要先选——它决定目标角和毫米刻度")
     ap.add_argument("--force", type=float, default=10.0,
                     help=f"夹持力前馈 [N]（默认 10，上限 {MAX_GRIP_FORCE_N:g}）")
     ap.add_argument("--duration", type=float, default=None,
@@ -113,12 +137,14 @@ class StreamMove:
 
     ⚠️ 为什么必须斜坡，不能直接跳到目标：
 
-    MIT 的位置增益是 ``kp``（这儿 100 Nm/rad）。一次的阶跃如果有一整段行程那么
-    大（1.845 rad），电机在第一帧就被要求输出 ``100 × 1.845 ≈ 185 Nm``——而
-    DM4310 额定力矩才 ~10 Nm。电流瞬间拉满，电机进欠压/过流保护并**锁死**，红
-    灯闪烁，之后就不再执行任何指令了（位置照常回报，所以看起来是「能读、不能
-    控」）。SDK 自己的 ``goto_rad`` / ``move_at_speed`` 也都是线性斜坡，正是为了
-    避免这一下；这里跟它保持一致。
+    MIT 的位置增益是标定文件里的 ``kp``：一帧要的力矩就是 ``kp × 目标与实测的
+    差``。SDK 默认 kp=100 Nm/rad，一整段行程（1.845 rad）的阶跃会在第一帧要求
+    ``100 × 1.845 ≈ 185 Nm``，而 DM4310 额定只有 ~10 Nm——电流瞬间拉满，电机进
+    欠压/过流保护并**锁死**，红灯闪烁，之后就不再执行任何指令（位置照常回报，
+    所以看起来是「能读、不能控」）。本机标定现在把 kp 调到 5.0，同样的阶跃约
+    9 Nm、落在额定之内，但 kp 是标定里的一项、随时可能被改回去，所以不押它：
+    斜坡限制的是**位置目标**的跳变，与 kp 取多少无关。SDK 自己的 ``goto_rad`` /
+    ``move_at_speed`` 也都是线性斜坡，这里跟它保持一致。
 
     两段的差别：
 
@@ -189,13 +215,19 @@ class StreamMove:
 #: ``move_at_speed`` 同一把尺子，也让真机走的速度和窗口里预览的速度一致。
 RATED_SPEED_MM_S = 85.0
 
+#: 实测：**使能态**的电机静默约这么久就闩锁 0xD 通信丢失故障（SDK 在真机上量到的）。
+#:
+#: ⚠️ 别拿 ``TIMEOUT`` 寄存器（RID 9）当依据：它读到过 8000 ms，也读到过 0＝当前
+#: 不生效，和实测的 ~0.9 s 都对不上，SDK 自己把这条标成「待查」。行为按实测走
+#: ——空闲也持续发帧。之前照寄存器那个 8000 ms 推出来的结论是错的。
+MEASURED_COMM_LOSS_S = 0.9
+
 #: 空闲时也必须持续发帧 [Hz]，和运动时同频。
 #:
-#: ⚠️ 电机的 ``TIMEOUT`` 寄存器（DM 寄存器表 RID 9）= CAN 通信超时保护：
-#: **连续这么久没收到帧就锁进通信丢失故障**——红灯闪、位置照读、指令一律不执行。
-#: 它的值会变（这台机器 2026-09-24 读到 8000、2026-09-28 读到 0），所以别背数字，
-#: 用 ``--status`` 读真值。空闲不发帧 = 在窗口里多看几秒就把真机看哑了。
-#: SDK 的 ``control_mit_stream`` 和 LiteGrip 控制台都是持续发帧的，正是为此。
+#: ⚠️ 这不是可选的优化：使能态的电机静默约 :data:`MEASURED_COMM_LOSS_S` 就锁进
+#: 通信丢失故障——红灯闪、位置照读、指令一律不执行。空闲不发帧 = 在窗口里多看
+#: 一眼就把真机看哑了。SDK 的 ``control_mit_stream`` 和 LiteGrip 控制台都是持续
+#: 发帧的，正是为此。
 IDLE_HZ = FRAME_HZ
 
 #: 保持段的默认时长 [s]：到位后加力顶住的时间。
@@ -220,23 +252,20 @@ def plan_duration(gripper, distance_rad: float, requested: float | None) -> floa
     return max(requested, min_s)
 
 
-#: SDK 的 ``ERROR_DESCRIPTIONS`` 认得 0x0/0x1/0x9/0xA/0xB/0xC，唯独不认 0xD——
-#: 而本机最容易锁上的恰恰是它：``TIMEOUT`` 寄存器到期、这期间一帧都没收到，电机
-#: 就报这个码（见 README 的故障表）。SDK 只会说「未知错误」，操作员
-#: 看不出「这是喂帧断了」和「电机坏了」的区别。其余码仍以 SDK 为准，免得两处
-#: 描述慢慢走偏。
-EXTRA_ERRORS = {
-    0xD: "通信超时故障（TIMEOUT 期内一帧都没收到）",
-}
-
-#: 没装 SDK 时的兜底表，内容抄自 ``litegrip.constants.ERROR_DESCRIPTIONS``。
+#: 没装 SDK（或者 SDK 比这颗错误码还老）时的兜底表，内容抄自
+#: ``litegrip.constants.ERROR_DESCRIPTIONS`` 的当前版本。0x8/0xD/0xE 是 SDK 后来
+#: 补上的；旧版会把它们报成「未知错误」，而本机最容易闩上的恰恰是 0xD，所以这里
+#: 必须自己认识它。
 FALLBACK_ERRORS = {
     0x0: "已失能",
     0x1: "已使能",
+    0x8: "过压故障 (OV)",
     0x9: "欠压故障 (UV)",
     0xA: "过流故障 (OC)",
     0xB: "MOS 过温故障",
     0xC: "线圈过温故障",
+    0xD: "通讯丢失 (CAN 超时)",
+    0xE: "过载故障",
 }
 
 
@@ -246,21 +275,27 @@ def describe_code(error_code: int) -> str:
     故障路径是最不该抛异常的地方：负责报故障的代码自己崩了，操作员就只剩一个
     回溯，看不到电机报的到底是哪一条。所以 ``describe_error`` 是懒导入且**带
     兜底**的——``--dry-run`` 和 CI 没装 SDK 也照样能翻译错误码。
+
+    认得这个码就用 SDK 的说法（0xD 已经在它的 ``ERROR_DESCRIPTIONS`` 里了）；
+    SDK 回「未知错误」＝它的表里没有这个码（那是 ``describe_error`` 唯一的兜底
+    话术），这时才退回本表。反过来先查本表是不行的：两处描述会慢慢走偏。
     """
-    if error_code in EXTRA_ERRORS:
-        return EXTRA_ERRORS[error_code]
     try:
         from litegrip.constants import describe_error
     except ImportError:
         return FALLBACK_ERRORS.get(error_code, f"未知错误 (0x{error_code:X})")
-    return describe_error(error_code)
+    text = describe_error(error_code)
+    if text.startswith("未知错误"):
+        return FALLBACK_ERRORS.get(error_code, text)
+    return text
 
 
 def fault_of(state) -> str | None:
     """状态里有故障就返回可读描述，否则 ``None``。
 
-    电机故障（欠压/过流/过温）是**锁死**的：不报错也不动，位置照常回报。必须在
-    循环里盯着，否则会一直对着一个已经不听话的电机发帧。
+    电机的故障（0xD 通信丢失、0x9 欠压、0xA 过流、0xB/0xC 过温）是**锁死**的：
+    不报错也不动，位置照常回报。必须在循环里盯着，否则会一直对着一个已经不听
+    话的电机发帧。
     """
     if not state.is_error:
         return None
@@ -281,8 +316,8 @@ def hold_frame(
     ⚠️ 「现在的位置」必须真的**是现在**，所以走 :func:`fresh_state`（等到一帧新的
     状态帧）而不是 ``get_state(wait=False)`` 的缓存。缓存里没读到过位置时是 SDK
     的初值 ``0.0``——拿它当目标发出去，就是一条指向 0 rad 的**阶跃**指令，电机按
-    ``kp=100`` 去追那个根本不存在的误差。少发一帧不会让电机乱动，发错目标会，
-    所以读不到就返回 ``None``，调用方负责不发。
+    标定里的 ``kp``（SDK 默认 100 Nm/rad）去追那个根本不存在的误差。少发一帧不会
+    让电机乱动，发错目标会，所以读不到就返回 ``None``，调用方负责不发。
 
     Args:
         request: 等之前先发一帧 READ-ONLY 的 ``0xCC`` 状态请求（见
@@ -300,12 +335,12 @@ def hold_frame(
 class IdleKeeper:
     """空闲保活：没有指令在走的时候，照样按 :data:`IDLE_HZ` 接着发帧。
 
-    ⚠️ 这不是可选的优化，是必须的。电机的 ``TIMEOUT`` 寄存器是 CAN 通信超时保护：
-    连续这么久收不到帧，电机就锁进通信丢失故障——位置照读、指令不执行、红灯闪。
-    这个寄存器会变（这台机器读到过 8000 ms，也读到过 0＝当前不生效），所以别背
-    那个数字，``--status`` 打的是实测值；只要它不为 0，在窗口里多看一眼就够触发，
-    而且**发再多帧也解不开**（得显式清故障）。SDK 的 ``control_mit_stream`` 和
-    LiteGrip 控制台都是持续发帧的，正是为此。
+    ⚠️ 这不是可选的优化，是必须的。**使能态**的电机静默约
+    :data:`MEASURED_COMM_LOSS_S` 就锁进通信丢失故障——位置照读、指令不执行、
+    红灯闪；而且在窗口里多看一眼就够触发，**发再多帧也解不开**（得显式清故障）。
+    别拿 ``TIMEOUT`` 寄存器推算这个时长，它和实测对不上，见
+    :data:`MEASURED_COMM_LOSS_S`。SDK 的 ``control_mit_stream`` 和 LiteGrip
+    控制台都是持续发帧的，正是为此。
 
     发什么：优先「接着上一条指令的最后一帧发」——这样夹持力不会因为空闲而松掉；
     还没下发过指令时发一条锁位帧（目标 = 实测位置、零前馈），不命令任何运动。
@@ -408,8 +443,9 @@ def real_line(fraction: float, force_n: float, moving: bool) -> str:
 def read_registers(gripper) -> dict[str, float]:
     """读几个 DM 寄存器，读不到的跳过（**只发读请求，不是运动指令**）。
 
-    ``TIMEOUT`` 是重点：它就是「连续多久收不到帧就锁故障」的那个值。样例 02/03
-    空闲时必须持续发帧，正是为了不让它到期。
+    ``TIMEOUT`` 是电机对看门狗**声明**的时长；实测的闩锁时间
+    （:data:`MEASURED_COMM_LOSS_S`）和它 对不上，见 ``--status`` 的说明。这里读
+    它只是为了把真值打出来，逻辑上不依赖它。
     """
     from litegrip.can.protocol import DM_REG
 
@@ -435,6 +471,10 @@ def run_status(args: argparse.Namespace) -> int:
     output"），都不带位置/力矩目标。所以电机不会产生任何运动，可以在夹着工件、
     或手指在别人手里的时候安全地跑。
 
+    标定照样要先选（``--calib`` 或当场从候选里选）：读回来的位置要换成开度，
+    靠的就是标定的角度和 ``rad_to_mm``——用别台机器的刻度换算，打出来的百分比
+    是错的，而这条路径存在的意义就是让这个百分比可信。
+
     加 ``--clear-fault`` 才会写：发的也只是 SDK 的故障清除序列——全程
     ``kp=0/kd=0/tau=0`` 的零力矩帧，**不命令任何运动**。但要说清楚：
     ``clear_fault()`` 内部是 disable → clear → enable，中间那一瞬间电机是失力
@@ -455,7 +495,7 @@ def run_status(args: argparse.Namespace) -> int:
     cleared = 0
     try:
         # 没使能的电机不会自己发帧，所以先请它回一帧（0xCC，只读、不改输出）
-        # 再读。少了这一步，等不到的 poll 会让 get_state() 返回 SDK 的初值
+        # 再读。少了这一步，等不到的 poll 会让 get_state() 返回 MotorState 的初值
         # 0.0——打印出来就是「5.5% / 6.63 mm」这种**伪造**读数（真值实测是
         # −0.370 rad ≈ 27.5%），拿来判断故障只会把人带偏。
         state = fresh_state(gripper, timeout_s=STATUS_WAIT_S, request=True)
@@ -463,8 +503,10 @@ def run_status(args: argparse.Namespace) -> int:
             print(f"   ❌ 读不到状态帧：已经请它回一帧（0xCC，不改电机输出）"
                   f"并等了 {STATUS_WAIT_S:g} s。")
             print("      **这种情况下没有可信的位置，也没有可信的故障码**：")
-            print("      SDK 的 get_state() 这时返回的是它自己的初值 0.0，打出来"
-                  "看着像「夹爪在 5.5%」，「从没读到过」才是它的真意。")
+            print("      SDK 现在会把这件事说出来——GripperState.has_data 为假、"
+                  "is_stale 为真——而 get_state() 返回的 position 只是它构造时的"
+                  "初值 0.0。打出来看着像「夹爪在 5.5%」，「从没读到过」才是它的"
+                  "真意。")
             print("      查这几处：")
             print("        · 夹爪是否上电；CAN_H/CAN_L 有没有接反；120Ω 终端电阻；")
             print(f"        · 接口是否真的起来：ip -details link show {args.channel}")
@@ -489,17 +531,16 @@ def run_status(args: argparse.Namespace) -> int:
             print(f"   寄存器 {shown}")
         timeout_ms = registers.get("TIMEOUT")
         if timeout_ms:
-            print(f"   ⏱  通信超时保护 = {timeout_ms:g} ms：连续这么久收不到帧，"
-                  f"电机会锁进通信丢失故障（位置照读、指令不执行、红灯闪）。\n"
-                  f"      样例 02/03 空闲时也在持续发帧，就是为了不让它到期；\n"
-                  f"      只读不喂帧（或跑了别的只读脚本）同样会把它看哑。")
+            print(f"   ⏱  通信超时保护（TIMEOUT, RID 9）= {timeout_ms:g} ms")
         elif "TIMEOUT" in registers:
-            print("   ⏱  通信超时保护 = 0：**这台机器上它当前不生效**，不喂帧也"
-                  "不会因此锁故障。")
-            print("      （同一台机器 2026-09-24 读到的是 8000 ms——这个值会变，"
-                  "以这里的实测为准。）")
-            print("      样例 02/03 照样持续发帧：换个电机、或有人改过这个寄存器，"
-                  "结论就不一样。")
+            print("   ⏱  通信超时保护（TIMEOUT, RID 9）= 0（这个寄存器当前不生效）")
+        if "TIMEOUT" in registers:
+            print(f"   ⚠️  别拿这个寄存器当依据：实测**使能态**的电机静默约 "
+                  f"{MEASURED_COMM_LOSS_S:g} s 就锁 0xD 通信丢失故障，与寄存器读数"
+                  "对不上（这台机器读到过 8000，也读到过 0），SDK 自己把这条标成"
+                  "「待查」。")
+            print("      所以 02/03 空闲时照 200 Hz 持续发帧，不赌这个数字；只读"
+                  "不喂帧（或跑了别的只读脚本）同样会把它看哑。")
 
         if not state.is_error:
             print("   ✅ 没有故障。真机能正常接受指令——想动它就直接跑本样例"
@@ -529,11 +570,12 @@ def run_status(args: argparse.Namespace) -> int:
               "现在可以跑本样例正常下发了。")
         return 0
     finally:
+        # disconnect() 自己会先失能（0xFD）再关总线，而 clear_fault() 结束时电机
+        # 是使能态的——所以清完故障退出，电机**不会**保持在原来的位置：手指会松。
+        # 以前这里写的是「已重新使能，电机保持当前姿态」，与代码实际做的事相反。
         gripper.disconnect()
-        # 清完故障就停在「使能且零力矩」——这是它本来该有的样子，不再动它；
-        # 只是把这次操作说清楚，免得用户以为还需要做什么。
         print("[真机] 已断开"
-              + ("（已重新使能，电机保持当前姿态）" if cleared else
+              + ("（已清故障并失能：手指会松、夹着的工件会掉）" if cleared else
                  "（未使能，未发送任何运动指令）"))
 
 
@@ -554,6 +596,17 @@ def main() -> int:
     force_n = max(0.0, min(MAX_GRIP_FORCE_N, args.force))
     if args.dry_run:
         print("样例 02 · 仿真控制真机（--dry-run：不碰真机，只走流程）")
+        # dry-run 也要先选标定：它走的正是这套参数（目标角、毫米刻度都由标定
+        # 决定）。只读文件、不导入 SDK、不建 CAN 对象——所以这里用纯值版的自洽
+        # 检查，SDK 那边的 config 此刻不存在。
+        calib_path = choose_calibration_file(args.calib)
+        calib = read_calibration_file(calib_path)
+        check_calibration_values(
+            float(calib["zero_position_rad"]), float(calib["max_position_rad"]),
+            float(calib["rad_to_mm"]), NOMINAL_STROKE_MM,
+        )
+        print(f"   标定 {calib_path}")
+        print(f"        {calibration_summary(calib)}")
         gripper = None
         n_to_nm = NOMINAL_N_TO_NM
     else:
@@ -563,8 +616,8 @@ def main() -> int:
         n_to_nm = import_litegrip().UnitConversion.N_TO_NM
 
     # ⚠️ 从这里起全部在 try 里：真机一旦使能（上面 open_real_gripper 干的事），
-    # 任何异常都必须走到 finally 去 stop/disconnect。否则程序带着一个「已使能、
-    # 但再没人喂帧」的电机退出——TIMEOUT 一到就锁通信超时故障（红灯闪），而且因为
+    # 任何异常都必须走到 finally 去 disable/disconnect。否则程序带着一个「已使能、
+    # 但再没人喂帧」的电机退出——静默约 0.9 s 就锁通信超时故障（红灯闪），而且因为
     # 进程已经死了，连是哪一步炸的都看不到。窗口建得慢、滑条建不出来，都算在这里面。
     sim = None
     keeper: IdleKeeper | None = None
@@ -595,9 +648,11 @@ def main() -> int:
         if gripper is None:
             print("   （dry-run：按 Enter 只打印，不会真的下发）")
         else:
-            # 使能之后**立刻**喂一帧锁在当前位置，不等主循环第一圈：`enable()`
-            # 打完那条零力矩底帧就不再发了（SDK 的 initialize 不负责保活），
-            # 而建窗口、建滑条这些事要几百毫秒。先喂上，通信超时计数器归零。
+            # 使能之后**立刻**喂一帧锁在当前位置，不等主循环第一圈。SDK 的
+            # `enable()` 现在会自己抱在实测位置（`_enable_and_hold`：使能帧 →
+            # 0.05 s 零力矩流 → 等一帧新状态 → 锁位），但那条流只有 50 ms，之后
+            # 就没人喂了，而建窗口、建滑条要几百毫秒——使能态静默约
+            # `MEASURED_COMM_LOSS_S` 就锁 0xD，等不起。所以先喂上，计数器归零。
             keeper = IdleKeeper(gripper)
             keeper.maybe_send(time.monotonic())
             print(f"   [真机] 已锁在当前位置（保活 {IDLE_HZ:g} Hz 已开始，"
@@ -744,10 +799,16 @@ def main() -> int:
         print("\n收到 Ctrl-C")
     finally:
         if gripper is not None:
-            # 停发 MIT 帧即可：达妙电机丢了指令会保持当前位置，不会乱动
-            gripper.stop()
+            # 退出时**明确失能**（0xFD），而不是只停发帧：
+            #   · stop() 只发一帧 kp=0，电机还是「使能 + 没人喂帧」——实测这种
+            #     状态静默约 0.9 s 就锁 0xD 通信丢失故障，而进程一退就没人能清它；
+            #   · disable() 把电机放到「已失能」：它不再需要帧，也不会闩故障。
+            # 代价说清楚：失能后手指是软的，夹着的工件会掉、手指可能因自重滑动。
+            # 「退出把电机留成故障态」比松手严重得多，所以选失能。
+            gripper.disable()
             gripper.disconnect()
-            print("[真机] 已停止发帧并断开")
+            print("[真机] 已失能（0xFD）并断开：手指会松、夹着的工件会掉；"
+                  "这样退出不会在电机上留下通信超时故障")
         if sim is not None:
             sim.disconnect()
 

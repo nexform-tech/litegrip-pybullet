@@ -73,21 +73,12 @@ class FakeClock:
         self.now += dt
 
 
-class FakeController:
-    """The SDK's internal 0xCC hook, recording what it was asked to do."""
-
-    def __init__(self) -> None:
-        self.refreshes = 0
-
-    def refresh_status(self, motor) -> None:
-        self.refreshes += 1
-
-
 class FakeGripper:
     """Stands in for a connected, enabled ``LiteGrip``.
 
-    ``answer`` decides, per poll, whether a status frame arrived — that is the
-    only public signal saying the cached position is current.
+    ``answer`` decides, per attempt, whether a status frame arrived — that is
+    the public signal saying the cached position is current, and a bus that has
+    gone quiet gives the same answer to a poll and to a 0xCC request.
     """
 
     def __init__(self, position_rad: float = START_RAD, answer=None) -> None:
@@ -95,11 +86,10 @@ class FakeGripper:
         self.answer = answer or (lambda n: True)
         self.polls = 0
         self.frames: list[dict] = []
+        self.refreshes: list[float] = []
         self.zero_gravity_calls: list[str] = []
+        self.disabled = False
         self.disconnected = False
-        self.controller = FakeController()
-        self._can = SimpleNamespace(_controller=self.controller,
-                                    _motor=object())
         self.config = SimpleNamespace(
             pos_closed_rad=POS_CLOSED_RAD,
             pos_open_rad=POS_OPEN_RAD,
@@ -110,9 +100,16 @@ class FakeGripper:
         )
 
     # ── the LiteGrip surface example 03 uses ────────────────────────────
-    def poll(self, timeout_s: float = 0.0) -> bool:
+    def _answers(self) -> bool:
         self.polls += 1
         return bool(self.answer(self.polls))
+
+    def poll(self, timeout_s: float = 0.0) -> bool:
+        return self._answers()
+
+    def refresh_status(self, timeout_s: float = 0.5) -> bool:
+        self.refreshes.append(timeout_s)
+        return self._answers()
 
     def get_state(self, wait: bool = True):
         return SimpleNamespace(
@@ -120,6 +117,9 @@ class FakeGripper:
             position_mm=(POS_CLOSED_RAD - self.position_rad) * RAD_TO_MM,
             force_n=0.0,
             velocity_rad_s=0.0,
+            data_age_s=0.0,
+            has_data=True,
+            is_stale=False,
             is_moving=False,
             error_code=1,
             is_error=False,
@@ -134,6 +134,9 @@ class FakeGripper:
 
     def exit_zero_gravity(self) -> None:
         self.zero_gravity_calls.append("exit")
+
+    def disable(self) -> None:
+        self.disabled = True
 
     def disconnect(self) -> None:
         self.disconnected = True
@@ -200,14 +203,24 @@ def _run(monkeypatch, gripper=None, steps=60, keys_at=None, on_tick=None,
         duration=0.0,
     )
 
+    # ``open_real_gripper`` is where the motor would be enabled; the fake records
+    # how it was asked, so a mode that must not enable can be told apart from one
+    # that must.
+    opened: list[dict] = []
+
+    def fake_open(a, enable=True):
+        opened.append(dict(enable=enable))
+        return gripper
+
     monkeypatch.setattr(ex03, "parse_args", lambda: args)
-    monkeypatch.setattr(ex03, "open_real_gripper", lambda a: gripper)
+    monkeypatch.setattr(ex03, "open_real_gripper", fake_open)
     monkeypatch.setattr(ex03, "GripperSim", lambda **kw: sim)
     monkeypatch.setattr(ex03, "time", SimpleNamespace(
         monotonic=clock.monotonic, sleep=lambda s: None))
 
     code = ex03.main()
-    return SimpleNamespace(code=code, sim=sim, gripper=gripper, clock=clock)
+    return SimpleNamespace(code=code, sim=sim, gripper=gripper, clock=clock,
+                           opened=opened)
 
 
 def fraction_of(rad: float) -> float:
@@ -234,8 +247,46 @@ class TestMirroring:
     def test_passive_sends_no_frame_at_all(self, monkeypatch):
         run = _run(monkeypatch, passive=True, steps=40)
         assert run.gripper.frames == []
-        assert run.gripper.controller.refreshes == 0, \
+        assert run.gripper.refreshes == [], \
             "--passive 说好了一帧都不发，0xCC 请求也是 CAN 帧"
+        assert not run.gripper.disabled, \
+            "--passive 下一帧都没发过，退出时也不该补一帧 0xFD 失能"
+
+    def test_passive_does_not_enable_the_motor(self, monkeypatch):
+        """Enabling and then sending nothing is what latches 0xD: about a second
+        later the motor reports communication loss. ``--passive`` is "watch
+        someone else drive it", so it must not enable either."""
+        run = _run(monkeypatch, passive=True, steps=40)
+        assert run.opened == [dict(enable=False)], \
+            "--passive 还是把电机使能了——使能了又没人喂帧，约 1 s 就锁 0xD"
+
+    def test_the_default_mode_does_enable(self, monkeypatch):
+        """The mirror mode holds the fingers with stiffness, which needs the
+        motor enabled."""
+        run = _run(monkeypatch, steps=40)
+        assert run.opened == [dict(enable=True)]
+
+
+class TestExiting:
+    """Leaving the motor enabled and silent is what latches 0xD.
+
+    ``exit_zero_gravity()`` is a single frame, so the old exit path left an
+    enabled motor with nobody feeding it: about a second later it latched the
+    communication-loss fault, and the process that could have cleared it was
+    already gone.
+    """
+
+    def test_the_exit_disables_the_motor(self, monkeypatch):
+        run = _run(monkeypatch, steps=40)
+        assert run.gripper.disabled, "退出时没有失能——电机会在无人喂帧时锁故障"
+
+    def test_it_disables_even_when_it_was_left_soft(self, monkeypatch):
+        """Coming out of --zero-gravity, one relock frame is not enough: nothing
+        follows it, so the enabled motor goes quiet and latches a fault."""
+        run = _run(monkeypatch, zero_gravity=True, steps=40)
+        assert run.gripper.disabled
+        assert run.gripper.zero_gravity_calls == ["enter"], \
+            "退出时又发了一帧 exit_zero_gravity——那一帧之后还是没人喂"
 
 
 class TestItWillNotCommandAnUnmeasuredPosition:
@@ -258,7 +309,7 @@ class TestItWillNotCommandAnUnmeasuredPosition:
         """Waiting forever is not an option either: an unfed motor stays quiet."""
         gripper = FakeGripper(answer=lambda n: False)
         run = _run(monkeypatch, gripper=gripper, steps=40)
-        assert run.gripper.controller.refreshes > 0, \
+        assert run.gripper.refreshes, \
             "读不到帧也不叫它一声——那就永远读不到了"
 
     def test_it_holds_once_the_motor_starts_answering(self, monkeypatch):

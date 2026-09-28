@@ -59,10 +59,12 @@ KD = 2.0
 #: The motor is rated around 10 Nm; a sustained command past that stalls it.
 MOTOR_RATED_NM = 10.0
 
-#: The DM4310's CAN watchdog, as ``TIMEOUT`` was last read on this machine (it
-#: has also read 0, i.e. off — the tests care that the cadence beats the value,
-#: not that the hardware currently holds it).
-WATCHDOG_S = 8.0
+#: How long an enabled motor can go silent before it latches the
+#: communication-loss fault, as measured on this hardware (the SDK's own
+#: number).  The motor's ``TIMEOUT`` register says 8000 ms — and has also said 0
+#: — which does not match the measurement, so the cadence is held against the
+#: measured value rather than the register.
+WATCHDOG_S = 0.9
 
 
 class FakeClock:
@@ -78,16 +80,6 @@ class FakeClock:
         self.now += dt
 
 
-class FakeController:
-    """The one SDK internal ``request_status_frame`` (0xCC) reaches for."""
-
-    def __init__(self) -> None:
-        self.refreshes = 0
-
-    def refresh_status(self, motor) -> None:
-        self.refreshes += 1
-
-
 class FakeGripper:
     """Stands in for a connected, enabled ``LiteGrip``.
 
@@ -100,15 +92,15 @@ class FakeGripper:
         self.position_rad = position_rad
         self.error_code = error_code
         #: False = the motor is not sending status frames (a wedged motor, a
-        #: deaf master, a second program on the bus).  ``poll`` is the only
-        #: public way to tell that apart from a live one.
+        #: deaf master, a second program on the bus).  ``poll`` and
+        #: ``refresh_status`` are the public ways to tell that apart from a live
+        #: one, and neither can answer on a bus that carries nothing.
         self.answering = answering
         self.frames: list[dict] = []
         self.stopped = False
+        self.disabled = False
+        self.refreshes: list[float] = []
         self.disconnected = False
-        self.controller = FakeController()
-        self._can = SimpleNamespace(_controller=self.controller,
-                                    _motor=object())
         self.config = SimpleNamespace(
             pos_closed_rad=POS_CLOSED_RAD,
             pos_open_rad=POS_OPEN_RAD,
@@ -124,12 +116,22 @@ class FakeGripper:
         """``LiteGrip.poll``: True = a *new* status frame arrived just now."""
         return self.answering
 
+    def refresh_status(self, timeout_s: float = 0.5) -> bool:
+        """``LiteGrip.refresh_status``: sends 0xCC, then waits for the reply."""
+        self.refreshes.append(timeout_s)
+        return self.answering
+
     def get_state(self, wait: bool = True):
         return SimpleNamespace(
             position_rad=self.position_rad,
             position_mm=(POS_CLOSED_RAD - self.position_rad) * RAD_TO_MM,
             force_n=0.0,
             velocity_rad_s=0.0,
+            # A frame just arrived (``answering``), so the snapshot is backed by
+            # data and young — the two signals ``fresh_state`` cross-checks.
+            data_age_s=0.0,
+            has_data=True,
+            is_stale=False,
             is_moving=False,
             error_code=self.error_code,
             is_error=self.error_code not in (0, 1),
@@ -141,7 +143,11 @@ class FakeGripper:
         return True
 
     def stop(self) -> None:
+        """Zero-torque but still *enabled* — the exit path must not use this."""
         self.stopped = True
+
+    def disable(self) -> None:
+        self.disabled = True
 
     def disconnect(self) -> None:
         self.disconnected = True
@@ -309,10 +315,13 @@ class TestEnterDispatch:
 class PollSchedule(FakeGripper):
     """A gripper whose status frames follow a schedule.
 
-    ``answer`` gets the poll count and decides whether that frame arrived, so a
-    test can say "answers for a while, then goes quiet" — the dangerous case,
+    ``answer`` gets the attempt count and decides whether that frame arrived, so
+    a test can say "answers for a while, then goes quiet" — the dangerous case,
     because the cached position is then a *plausible old* value rather than the
     SDK's 0.0, and nothing looks wrong until the value is used.
+
+    Both ways of asking share the count, because they are the same question: a
+    bus that has gone quiet answers neither a poll nor a 0xCC request.
     """
 
     def __init__(self, answer, **kwargs) -> None:
@@ -320,9 +329,16 @@ class PollSchedule(FakeGripper):
         self.answer = answer
         self.polls = 0
 
-    def poll(self, timeout_s: float = 0.0) -> bool:
+    def _answers(self) -> bool:
         self.polls += 1
         return bool(self.answer(self.polls))
+
+    def poll(self, timeout_s: float = 0.0) -> bool:
+        return self._answers()
+
+    def refresh_status(self, timeout_s: float = 0.5) -> bool:
+        self.refreshes.append(timeout_s)
+        return self._answers()
 
 
 class TestItWillNotActOnAnUnmeasuredPosition:
@@ -388,8 +404,21 @@ class TestFaultHandling:
 
     def test_it_disconnects_even_when_nothing_was_sent(self, monkeypatch):
         run = _run(monkeypatch, steps=20)
-        assert run.gripper.stopped and run.gripper.disconnected
+        assert run.gripper.disconnected
         assert run.sim.disconnected
+
+    def test_the_exit_disables_rather_than_leaving_the_motor_enabled(self, monkeypatch):
+        """Stopping the frames is not enough.
+
+        ``stop()`` sends one kp=0 frame and leaves the motor *enabled*; an
+        enabled motor that hears nothing latches 0xD within about a second, and
+        a process that has exited cannot clear it — the next run then starts
+        looking at a wedged gripper.  ``disable()`` needs no frames at all.
+        """
+        run = _run(monkeypatch, steps=20)
+        assert run.gripper.disabled, "退出时没有失能——电机会在无人喂帧时锁故障"
+        assert not run.gripper.stopped, \
+            "用了 stop()：它只发一帧零力矩，电机仍是使能态"
 
 
 class TestStatusReportsMeasuredValues:
@@ -424,7 +453,8 @@ class TestStatusReportsMeasuredValues:
     def test_it_asks_for_a_frame_before_printing_a_position(self, monkeypatch, capsys):
         gripper = FakeGripper(position_rad=POS_OPEN_RAD + 0.3)
         code, out = self._status(monkeypatch, capsys, gripper)
-        assert gripper.controller.refreshes == 1, "没有先请它回一帧就读了缓存"
+        assert gripper.refreshes == [ex02.STATUS_WAIT_S], \
+            "没有先请它回一帧就读了缓存（或者没用 --status 那个更宽的等待预算）"
         expected = ex02.rad_to_fraction(gripper, gripper.position_rad) * 100
         assert f"{expected:5.1f}%" in out
         assert "6.63 mm" not in out, "又把「从没读到过」的 0.0 当成位置打印了"
@@ -443,13 +473,28 @@ class TestStatusReportsMeasuredValues:
         assert "✅ 没有故障" not in out
 
     def test_the_watchdog_registers_read_value_is_what_gets_reported(self, monkeypatch, capsys):
-        """The stored 8000 ms is not this machine's current truth: the register
-        is read live, and 0 (watchdog off) must not be reported as armed."""
-        _, live = self._status(monkeypatch, capsys, FakeGripper(), timeout_ms=0.0)
-        assert "通信超时保护 = 0" in live
-        _, stored = self._status(monkeypatch, capsys, FakeGripper(),
-                                 timeout_ms=8000.0)
-        assert "通信超时保护 = 8000" in stored
+        """The register is read live, so both of its values come out as read.
+
+        It used to be reported as *the* timeout: "hold this many ms and the
+        motor latches".  That was wrong — the register has read 8000 and 0, and
+        neither matches the ~0.9 s measured on this hardware — so the reading is
+        printed together with the measurement it contradicts.
+        """
+        _, off = self._status(monkeypatch, capsys, FakeGripper(), timeout_ms=0.0)
+        assert "通信超时保护（TIMEOUT, RID 9）= 0" in off
+        _, armed = self._status(monkeypatch, capsys, FakeGripper(),
+                                timeout_ms=8000.0)
+        assert "通信超时保护（TIMEOUT, RID 9）= 8000" in armed
+
+    def test_neither_register_value_is_passed_off_as_the_trip_time(self, monkeypatch, capsys):
+        """Whatever the register says, the reported trip time is the measured
+        one — a stale register must not become the operative number again."""
+        for timeout_ms in (0.0, 8000.0):
+            _, out = self._status(monkeypatch, capsys, FakeGripper(),
+                                  timeout_ms=timeout_ms)
+            assert "8000 ms 就锁" not in out
+            assert f"静默约 {ex02.MEASURED_COMM_LOSS_S:g} s 就锁" in out, \
+                "没把实测的闩锁时间说出来，读者只能拿寄存器当依据"
 
 
 class TestDescribingAFault:
@@ -462,11 +507,25 @@ class TestDescribingAFault:
     """
 
     def test_the_communication_watchdog_code_is_named(self):
-        """0xD is what this hardware latches, and the SDK calls it 未知错误."""
+        """0xD is what this hardware latches; the SDK now names it itself."""
         text = ex02.describe_code(0xD)
         assert "0xD" not in text and "未知错误" not in text, \
             f"0xD 又被打回「未知错误」了：{text}"
-        assert "TIMEOUT" in text or "超时" in text
+        assert "超时" in text or "丢失" in text
+
+    def test_a_stale_sdk_falls_back_to_our_own_table(self, monkeypatch):
+        """An SDK old enough to call 0xD unknown must not win over the table.
+
+        ``describe_error``'s only fallback wording is 未知错误, so that string is
+        the signal that *this* SDK's table does not have the code — the case the
+        local table exists for.
+        """
+        stub = SimpleNamespace(describe_error=lambda code: f"未知错误 (0x{code:X})")
+        monkeypatch.setitem(sys.modules, "litegrip", SimpleNamespace())
+        monkeypatch.setitem(sys.modules, "litegrip.constants", stub)
+        text = ex02.describe_code(0xD)
+        assert "未知错误" not in text, f"旧 SDK 一句话就把 0xD 顶掉了：{text}"
+        assert "超时" in text or "丢失" in text
 
     def test_the_sdk_still_gets_the_codes_it_knows(self):
         """Duplicating the table must not shadow the SDK's own wording."""
@@ -476,7 +535,7 @@ class TestDescribingAFault:
         """Exactly CI's situation: ``from litegrip... import`` raises."""
         monkeypatch.setitem(sys.modules, "litegrip", None)
         monkeypatch.setitem(sys.modules, "litegrip.constants", None)
-        for code in (0x0, 0x1, 0x9, 0xA, 0xB, 0xC, 0xD):
+        for code in (0x0, 0x1, 0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE):
             text = ex02.describe_code(code)
             assert "未知错误" not in text, \
                 f"没装 SDK 就翻译不出 0x{code:X} 了：{text!r}"
@@ -485,10 +544,12 @@ class TestDescribingAFault:
 
 
 class TestItNeverLeavesTheMotorUnfed:
-    """``enable()`` sends one priming frame and then stops; everything the
-    example does between that and its first loop frame is dead time, and enough
-    of it latches a communication-loss fault on an enabled, unattended motor
-    (``TIMEOUT``, RID 9 — 8000 ms when it was last read nonzero)."""
+    """``enable()`` holds the motor, but only for the 50 ms stream it sends.
+
+    Everything the example does between that and its first loop frame is dead
+    time, and enough of it latches a communication-loss fault on an enabled,
+    unattended motor — measured at about 0.9 s of silence, not the ``TIMEOUT``
+    register's 8000 ms, which reads 0 as often as not."""
 
     def test_a_frame_goes_out_before_the_window_is_even_used(self, monkeypatch):
         run = _run(monkeypatch, steps=0)      # the window dies immediately
@@ -517,7 +578,8 @@ class TestItNeverLeavesTheMotorUnfed:
 
         with pytest.raises(RuntimeError):
             ex02.main()
-        assert gripper.stopped, "建窗口失败后没有停发帧"
+        assert gripper.disabled, "建窗口失败后没让电机失能"
+        assert not gripper.stopped, "只停发帧：电机还是「使能 + 没人喂帧」"
         assert gripper.disconnected, "建窗口失败后没有断开真机——电机会被晾着"
 
 

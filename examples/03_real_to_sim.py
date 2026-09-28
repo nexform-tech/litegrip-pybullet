@@ -11,29 +11,35 @@
   * **用手推着看**（推荐，最能看出镜像效果）：加 ``--zero-gravity``，真机的
     电机失力，可以用手推动手指；仿真窗口会跟着你的手走。运行中按 **Z** 也能
     随时切换失力/使能。
-  * **看别人的程序驱动**：加 ``--passive``，本样例一帧都不发，只读；由那个
-    程序去喂真机。
+  * **看别人的程序驱动**：加 ``--passive``，本样例只连接、只读，**不使能也不发
+    帧**；由那个程序去喂真机。
 
-⚠️ 为什么必须持续发帧（默认模式）：电机的 ``TIMEOUT`` 寄存器（RID 9）= CAN 通信
-超时保护，**连续这么久收不到帧就锁进通信丢失故障**——红灯闪、位置照读、指令
-一律不执行。这个时长以电机上的实测值为准（这台机器读到过 8000 ms，也读到过
-0＝当前不生效，``--status`` 会打出来），只要它不为 0，「只是看」也得喂帧，见
-:data:`FRAME_HZ`。默认
+⚠️ 每次都要先选定这台夹爪的标定文件：``--calib`` 指定，不给就在终端里从候选里
+选，选不出来直接退出（**不会**用 SDK 的默认标定或出厂标定）。仿真的百分比和
+毫米都由标定的角度/``rad_to_mm`` 换算而来，用别台机器的刻度，画面就是错的。
+
+⚠️ 为什么默认模式必须持续发帧：**使能态**的电机静默约
+:data:`MEASURED_COMM_LOSS_S` 就锁进通信丢失故障（0xD）——红灯闪、位置照读、指令
+一律不执行。所以「只是看」也得喂帧，见 :data:`FRAME_HZ`。别拿电机的 ``TIMEOUT``
+寄存器（RID 9）推算这个时长：它读到过 8000 ms，也读到过 0＝当前不生效，和实测都
+对不上，SDK 自己把这条标成「待查」。默认
 模式发的是「锁在实测位置」的保持帧（零前馈、目标就是它现在的位置），不命令任何
-运动，但会让手指有刚度、推它它会顶回来。要看别人的程序驱动就用 ``--passive``，
-否则两边发的帧会互相打架。
+运动，但会让手指有刚度、推它它会顶回来。要看别人的程序驱动就用 ``--passive``：
+它**不使能**，一帧都不发，所以也不会因为「使能了却没人喂帧」把电机锁成 0xD
+故障。
 
 按键：
   Z         真机失力（可用手推）/ 恢复使能
-  Esc / Q   退出（退出前会恢复使能，让真机自己保持住位置）
+  Esc / Q   退出（退出前会**失能**：手指会松、夹着的工件会掉，但不会在电机上
+            留下通信超时故障——使能态静默约 0.9 s 就锁 0xD）
 
 ⚠️ ``--zero-gravity`` 时真机是**软**的：手指可以被推动，也会因为重力或外力
 自己滑动。托住夹爪再看，别让它在行程中间突然松掉。
 
 运行：
-  python3 examples/03_real_to_sim.py --zero-gravity     # 用手推，仿真跟着动
+  python3 examples/03_real_to_sim.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
   python3 examples/03_real_to_sim.py                    # 只镜像（发锁位帧保活）
-  python3 examples/03_real_to_sim.py --passive          # 一帧不发，等别人喂
+  python3 examples/03_real_to_sim.py --passive          # 不使能、一帧不发，等别人喂
   python3 examples/03_real_to_sim.py --headless         # 无窗口，只看终端读数
   python3 examples/03_real_to_sim.py --duration 10      # 看 10 s 后自动退出
 """
@@ -61,18 +67,17 @@ from litegrip_pybullet import (
 
 #: 发 MIT 帧 / 刷新镜像的频率 [Hz]，和 SDK 自己的流式循环一致。
 #:
-#: ⚠️ 这个频率不只是「运动时才用」：电机的 ``TIMEOUT`` 寄存器（DM 寄存器表
-#: RID 9）= CAN 通信超时保护，**连续这么久收不到帧就锁进通信丢失故障**——红灯
-#: 闪、位置照读、指令一律不执行。这个值会变（这台机器 2026-09-24 读到 8000、
-#: 2026-09-28 读到 0），以 ``--status`` 的实测为准。本样例即使只是「看」，也必须
-#: 按这个频率持续发帧；只 poll 不喂帧，看几秒就把真机看哑了。
+#: ⚠️ 这个频率不只是「运动时才用」：**使能态**的电机静默约
+#: :data:`MEASURED_COMM_LOSS_S` 就锁进通信丢失故障——红灯闪、位置照读、指令
+#: 一律不执行。本样例即使只是「看」，也必须按这个频率持续发帧；只 poll 不喂帧，
+#: 看一秒就把真机看哑了。
 FRAME_HZ = 200.0
 FRAME_DT = 1.0 / FRAME_HZ
 
-#: 上面那段说的通信超时保护时长 [s]，取这台机器读到过的那个值（2026-09-24 是
-#: 8000，2026-09-28 是 0）。只用来把话说具体，逻辑上不依赖它——真值随时可能被
-#: 改，要读它得用 ``--status``。
-KEEPALIVE_TIMEOUT_S = 8.0
+#: 实测的通信超时闩锁时间 [s]：使能态的电机静默这么久就报 0xD（SDK 在真机上量到
+#: 的）。只用来把话说具体，逻辑上不依赖它——电机的 ``TIMEOUT`` 寄存器读到过
+#: 8000、也读到过 0，和这个实测值都对不上（SDK 标注「待查」）。
+MEASURED_COMM_LOSS_S = 0.9
 
 #: 终端读数的最小刷新间隔 [s]。
 PRINT_DT = 0.5
@@ -91,8 +96,9 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--zero-gravity", action="store_true",
                     help="启动就让真机失力（可用手推动手指，仿真跟着走）")
     ap.add_argument("--passive", action="store_true",
-                    help="一帧都不发，只读——已经有别的程序在驱动真机时用；"
-                         "单跑的话别加（没人喂帧，真机会锁通信超时故障）")
+                    help="只连接、只读：**不使能**、一帧都不发——已经有别的程序在"
+                         "驱动真机时用；单跑的话别加（没人喂帧，真机会锁通信超时"
+                         "故障）")
     ap.add_argument("--duration", type=float, default=0.0,
                     help="跑多少秒后自动退出（默认 0 = 一直跑到 Esc/Q 或关窗口）")
     return ap.parse_args()
@@ -125,7 +131,11 @@ def main() -> int:
     args = parse_args()
 
     print("样例 03 · 真机控制仿真")
-    gripper = open_real_gripper(args)
+    # --passive 是「只看别人的」：**不使能**、一帧都不发。以前这里也是使能了再
+    # 一帧不发，于是名不副实——使能态的电机静默约 0.9 s 就自己锁 0xD 通信丢失
+    # 故障。不使能的电机不需要帧，也就没有这个故障可闩，而且不用给手指任何刚度，
+    # 「只读」才是真的只读。
+    gripper = open_real_gripper(args, enable=not args.passive)
 
     # 重力设 0：镜像是纯显示，不需要动力学；免得手指在仿真里自己往下出溜。
     sim = GripperSim(urdf_path=args.urdf, gui=not args.headless, gravity=(0, 0, 0))
@@ -137,11 +147,10 @@ def main() -> int:
 
     zero_gravity = False
     if args.passive:
-        print("   （--passive：一帧都不发，只读。真机得由别的程序喂帧，"
-              f"否则 TIMEOUT（本机读到过 {KEEPALIVE_TIMEOUT_S:g} s）一到就锁"
-              "通信超时故障）")
+        print("   （--passive：不使能、一帧都不发，只读。真机得由别的程序喂帧；"
+              "这里不抢总线）")
         if args.zero_gravity:
-            print("   （--zero-gravity 在 --passive 下无效：失力也需要发帧）")
+            print("   （--zero-gravity 在 --passive 下无效：失力也要发帧）")
     elif args.zero_gravity:
         zero_gravity = set_zero_gravity(gripper, True, zero_gravity)
     else:
@@ -199,9 +208,9 @@ def main() -> int:
                     print(f"   [真机] 锁在实测位置 {hold_rad:+.4f} rad"
                           "（零前馈，不命令运动）")
 
-            # 两种模式都必须**持续发帧**，理由见 :data:`FRAME_HZ`：电机的 CAN
-            # 通信超时保护一到就锁通信丢失故障。只在这一个线程里收发，不会有
-            # 第二个线程抢 CAN 帧。
+            # 两种模式都必须**持续发帧**，理由见 :data:`FRAME_HZ`：使能态的电机
+            # 静默约 MEASURED_COMM_LOSS_S 就锁通信丢失故障。只在这一个线程里收发，
+            # 不会有第二个线程抢 CAN 帧。
             if not args.passive and now - last_frame >= FRAME_DT:
                 last_frame = now
                 if zero_gravity:
@@ -258,12 +267,20 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n收到 Ctrl-C")
     finally:
-        if zero_gravity:
-            gripper.exit_zero_gravity()  # 别把真机留在「软」的状态下
-            print("[真机] 已恢复使能")
+        if not args.passive:
+            # 退出前**失能**（0xFD），而不是只发一帧 exit_zero_gravity() 就走：
+            # 那一帧之后没人再喂，使能态的电机静默约 0.9 s 就锁 0xD。失能则不需要
+            # 任何帧，也就没有故障可闩。
+            # 代价和 --zero-gravity 退出时一样：手指变软、可能因自重滑动。
+            gripper.disable()
+            print("[真机] 已失能（0xFD）：手指会松、可能因自重滑动；"
+                  "不会在电机上留下通信超时故障")
+        # disconnect() 只在使能过的时候才会补一帧 0xFD，所以 --passive 这条路
+        # 到这里为止确实一帧都没发出去。
         gripper.disconnect()
         sim.disconnect()
-        print("[真机] 已断开")
+        print("[真机] 已断开"
+              + ("（--passive：未使能、未发送任何帧）" if args.passive else ""))
 
     what = "一帧都没发" if args.passive else f"{frames} 帧保活/零重力指令"
     print(f"完成（{what}）。"
