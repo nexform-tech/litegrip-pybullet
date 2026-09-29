@@ -63,16 +63,48 @@ class TestFractionToTargetRad:
             cfg.pos_closed_rad - 60.0 / cfg.rad_to_mm
         )
 
-    def test_matches_the_sdk_goto_formula(self):
-        """Same arithmetic as ``goto(position_mm)`` — just spelled out."""
+    def test_it_agrees_with_the_sdk_goto_formula_on_a_consistent_file(self):
+        """Where the two can agree, they do.
+
+        On a file whose ``rad_to_mm`` was derived from the same
+        ``max_stroke_mm`` the SDK carries (``rad_to_mm == max_stroke_mm /
+        travel``), going through millimetres and going through the travel are
+        the same arithmetic.  The next test is the case where they are not.
+        """
         gripper = _config()
         cfg = gripper.config
+        assert cfg.rad_to_mm * (cfg.pos_closed_rad - cfg.pos_open_rad) == \
+            pytest.approx(cfg.max_stroke_mm)
         for fraction in (0.0, 0.25, 0.6, 1.0):
             position_mm = fraction * cfg.max_stroke_mm
             expected = cfg.pos_closed_rad - position_mm / cfg.rad_to_mm
             assert _common.fraction_to_target_rad(
                 gripper, fraction
             ) == pytest.approx(expected)
+
+    def test_a_file_with_a_different_mm_scale_still_reaches_full_open(self):
+        """The regression test for the saturating slider.
+
+        The file this machine actually has has ``rad_to_mm = 61.01`` over a
+        1.41 rad travel — a 86 mm scale — while ``load_calibration`` leaves
+        ``max_stroke_mm`` at the SDK's default 120.  Mapping through
+        ``position_mm / max_stroke_mm`` tops out at ``86 / 120 = 71.7 %``: the
+        top of the slider did nothing, and 50 % of the slider asked for 70 % of
+        the travel.  Normalising over the travel has no such premise, so the
+        ends have to land exactly on the calibrated ends.
+        """
+        travel = 1.409552
+        pos_closed, pos_open = 0.052071, 0.052071 - travel
+        gripper = _config(pos_closed_rad=pos_closed, pos_open_rad=pos_open,
+                          rad_to_mm=86.0 / travel, max_stroke_mm=120.0)
+
+        assert _common.fraction_to_target_rad(
+            gripper, 1.0) == pytest.approx(pos_open)
+        assert _common.fraction_to_target_rad(
+            gripper, 0.5) == pytest.approx(pos_closed - travel / 2.0)
+        # Half the slider is half the travel — not the 70 % the old map gave.
+        assert _common.fraction_to_target_rad(
+            gripper, 0.5) != pytest.approx(pos_closed - 60.0 / gripper.config.rad_to_mm)
 
     def test_rad_decreases_as_the_gripper_opens(self):
         """Open is the *negative* direction — the sign the SDK's goto implies."""
@@ -179,6 +211,85 @@ def _interactive(monkeypatch, on: bool) -> None:
     """
     monkeypatch.setattr(_common, "sys", SimpleNamespace(
         stdin=SimpleNamespace(isatty=lambda: on)))
+
+
+class TestCalibrationConfig:
+    """``--dry-run`` has no SDK and therefore no ``GripperConfig`` -- but it runs
+    the *same* arithmetic, so it needs a stand-in that is shaped like one.
+
+    The property that matters is not "the attributes exist" but "the helpers
+    cannot tell the difference": a dry run that computes its target angle from a
+    differently-shaped config would be advertising a number the real run never
+    uses.  So most of these tests go through ``fraction_to_target_rad`` /
+    ``rad_to_fraction`` rather than reading attributes.
+    """
+
+    def test_it_renames_the_file_keys_to_the_sdk_names(self):
+        """The file says ``zero_position_rad``; the SDK's config says
+        ``pos_closed_rad``.  Getting that mapping backwards would mirror the
+        whole travel, which is exactly the kind of quiet error the dry run is
+        supposed to surface rather than hide."""
+        cfg = _common.calibration_config(dict(CALIB))
+        assert cfg.pos_closed_rad == CALIB["zero_position_rad"]
+        assert cfg.pos_open_rad == CALIB["max_position_rad"]
+        assert cfg.rad_to_mm == pytest.approx(CALIB["rad_to_mm"])
+        assert cfg.kp == CALIB["kp"]
+        assert cfg.kd == CALIB["kd"]
+
+    def test_the_helpers_compute_what_the_real_path_computes(self):
+        """Same numbers as ``_config()``, which is what ``load_calibration``
+        leaves behind on hardware: 0 % is closed, 100 % is open, and the two
+        conversions invert each other."""
+        dry = SimpleNamespace(config=_common.calibration_config(dict(CALIB)))
+        real = _config()
+        assert (_common.fraction_to_target_rad(dry, 0.0)
+                == pytest.approx(_common.fraction_to_target_rad(real, 0.0)))
+        assert (_common.fraction_to_target_rad(dry, 1.0)
+                == pytest.approx(_common.fraction_to_target_rad(real, 1.0)))
+        for fraction in (0.0, 0.25, 0.5, 1.0):
+            target = _common.fraction_to_target_rad(dry, fraction)
+            assert _common.rad_to_fraction(dry, target) == pytest.approx(fraction)
+
+    def test_it_passes_the_same_self_consistency_check(self):
+        dry = SimpleNamespace(config=_common.calibration_config(dict(CALIB)))
+        _common.check_calibration(dry)          # must not raise
+
+    def test_an_inconsistent_file_still_stops_the_dry_run(self):
+        """The dry run is how a first-time user checks their calibration file,
+        so it has to reject the same files the real path rejects."""
+        bad = dict(CALIB, zero_position_rad=-1.731, max_position_rad=0.114)
+        dry = SimpleNamespace(config=_common.calibration_config(bad))
+        with pytest.raises(SystemExit, match="标定"):
+            _common.check_calibration(dry)
+
+    def test_a_file_without_kp_keeps_the_sdk_default(self):
+        """``kp``/``kd`` are optional in the file, and ``load_calibration`` only
+        sets the keys that are present -- so a missing one must not become 0.0,
+        which would command a motor with no position term at all."""
+        data = {k: v for k, v in CALIB.items() if k not in ("kp", "kd")}
+        cfg = _common.calibration_config(data)
+        assert cfg.kp == _common.NOMINAL_KP
+        assert cfg.kd == _common.NOMINAL_KD
+
+    def test_it_does_not_invent_the_keys_the_file_left_out(self):
+        """``mst_id``/``can_id`` live in the file too, but they are checked
+        against the command line before this point.  A default here would be a
+        second, contradictory answer."""
+        data = dict(CALIB, kp=5.0, kd=2.0)
+        data.pop("can_id")
+        data.pop("channel")
+        cfg = _common.calibration_config(data)
+        assert not hasattr(cfg, "can_id")
+        assert not hasattr(cfg, "can_channel")
+        assert cfg.mst_id == CALIB["mst_id"]
+
+    def test_the_stroke_is_a_nominal_override_not_a_calibrated_one(self):
+        """``max_stroke_mm`` is nowhere in the file: it is the millimetre scale
+        the SDK names, so the caller says which one to assume."""
+        assert (_common.calibration_config(dict(CALIB)).max_stroke_mm
+                == _common.NOMINAL_STROKE_MM)
+        assert (_common.calibration_config(dict(CALIB), max_stroke_mm=60.0)
+                .max_stroke_mm == 60.0)
 
 
 class TestChoosingCalibration:
@@ -463,12 +574,33 @@ class TestRadToFraction:
         assert _common.rad_to_fraction(gripper, 100.0) == 0.0
         assert _common.rad_to_fraction(gripper, -100.0) == 1.0
 
-    def test_zero_stroke_does_not_divide_by_zero(self):
-        gripper = _config(max_stroke_mm=0.0)
+    def test_zero_travel_does_not_divide_by_zero(self):
+        """The divisor is the travel, so a degenerate calibration is the case
+        that has to be caught — ``max_stroke_mm`` never enters this function."""
+        gripper = _config(pos_open_rad=0.114)     # travel == 0
         assert _common.rad_to_fraction(gripper, 0.0) == 0.0
 
+    def test_the_nominal_stroke_does_not_enter_the_mapping(self):
+        """Neither the SDK's default 120 nor a garbage value changes a reading.
+
+        On the old millimetre route a ``max_stroke_mm`` of 0 was a division by
+        zero and any other value scaled the answer.  Here the only two numbers
+        that matter are the two calibrated angles, so the same pose reads the
+        same however the nominal stroke is configured.
+        """
+        cfg = _config().config
+        half_travel_rad = (cfg.pos_closed_rad + cfg.pos_open_rad) / 2.0
+        for nominal in (0.0, 1.0, 120.0, 500.0):
+            assert _common.rad_to_fraction(
+                _config(max_stroke_mm=nominal), half_travel_rad
+            ) == pytest.approx(0.5)
+
     def test_the_reading_the_hardware_actually_gave(self):
-        """``get_state`` on can0 reported 29.85 mm → 24.9 % of the SDK scale."""
+        """``get_state`` on can0 reported 29.85 mm on the SDK's mm scale.
+
+        On a self-consistent file that is ``29.85 / 120 = 24.9 %`` of the
+        travel, and that is what the window should render.
+        """
         gripper = _config()
         cfg = gripper.config
         rad = cfg.pos_closed_rad - 29.85 / cfg.rad_to_mm

@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
 """Example 02's *main loop*, driven end to end against a fake gripper.
 
-``tests/test_example02_stream.py`` covers the ramp maths in isolation.  This
-file covers the part that only ever ran on real hardware before: ``main()``
-itself — slider reading, the Enter dispatch, the idle keep-alive, fault
-detection, the exit path — with a stand-in for ``LiteGrip`` and a stand-in for
-the PyBullet window.
+``tests/test_example02_stream.py`` covers the follow-the-slider maths in
+isolation.  This file covers the part that only ever ran on real hardware
+before: ``main()`` itself — slider reading, the drag detection, the idle
+keep-alive, fault detection, the exit path — with a stand-in for ``LiteGrip``
+and a stand-in for the PyBullet window.
+
+The interaction these tests pin down is the one the example was rewritten for:
+the motor holds its position when the example starts, the window mirrors where
+it actually is, and nothing moves until the slider is dragged.  A stationary
+slider is never a command, whatever it reads.
 
 Nothing here touches CAN or opens a window, so it is safe on a machine with a
 gripper attached, and it runs in milliseconds.  The values are the real ones
@@ -159,16 +164,18 @@ class FakeGripper:
 class FakeSim:
     """Stands in for ``GripperSim``: no window, no physics, a fixed step budget."""
 
-    def __init__(self, clock: FakeClock, steps: int, confirm_at: int | None = None,
-                 quit_at: int | None = None) -> None:
+    def __init__(self, clock: FakeClock, steps: int, quit_at: int | None = None) -> None:
         self.clock = clock
         self.steps_left = steps
-        self.confirm_at = confirm_at
         self.quit_at = quit_at
         self.tick = 0
         self.urdf_path = "fake.urdf"
-        self.commanded: list[float] = []
+        #: Every ``reset_fraction`` the loop asked for — the mirror.  There is no
+        #: ``command_fraction`` on this fake on purpose: the loop must not be
+        #: driving the simulated jaws, only placing them where the real ones are.
+        self.mirrored: list[float] = []
         self.status: list[str] = []
+        self.keys_emitted = 0
         self.disconnected = False
         self.focused = False
 
@@ -181,14 +188,14 @@ class FakeSim:
     def keyboard_events(self):
         # pybullet's shape: {key: bitmask}; ``pressed`` tests it with ``.get``.
         self.tick += 1
-        if self.confirm_at is not None and self.tick == self.confirm_at:
-            return {key: KEY_WAS_TRIGGERED for key in ex02.CONFIRM_KEYS}
         if self.quit_at is not None and self.tick == self.quit_at:
+            self.keys_emitted += 1
             return {key: KEY_WAS_TRIGGERED for key in ex02.QUIT_KEYS}
         return {}
 
-    def command_fraction(self, fraction: float) -> None:
-        self.commanded.append(fraction)
+    def reset_fraction(self, fraction: float) -> float:
+        self.mirrored.append(fraction)
+        return fraction
 
     def status_text(self, text: str) -> None:
         self.status.append(text)
@@ -203,34 +210,56 @@ class FakeSim:
 
 
 class FakeSliders:
-    """Stands in for the pybullet calls example 02 uses for its sliders."""
+    """Stands in for the pybullet calls example 02 uses for its sliders.
 
-    def __init__(self, target_fraction: float, force_n: float) -> None:
-        self.values = {1: target_fraction * 100.0, 2: force_n}
+    The opening slider starts wherever ``addUserDebugParameter`` was told to
+    start it — the example computes that from the gripper's own position — and
+    jumps to ``drag_to`` once the loop has run ``drag_tick`` times.  That is
+    what a mouse drag looks like from the loop's side: the value simply
+    changes.  Nothing else about it changes, which is how a slider the user has
+    *not* touched stays a non-command.
+    """
+
+    def __init__(self, drag_to: float | None = None, drag_tick: int | None = None,
+                 tick_fn=None) -> None:
+        self.values: dict[int, float] = {}
         self.created: list[tuple] = []
+        self.drag_to = drag_to
+        self.drag_tick = drag_tick
+        self.tick_fn = tick_fn
 
     def addUserDebugParameter(self, name, lo, hi, start):   # noqa: N802 (pybullet)
         index = len(self.created) + 1
         self.created.append((name, lo, hi, start))
-        self.values.setdefault(index, start)
+        self.values[index] = start
         return index
 
     def readUserDebugParameter(self, index):                # noqa: N802 (pybullet)
+        if index == 1 and self.drag_to is not None and self.tick_fn is not None \
+                and self.tick_fn() >= self.drag_tick:
+            self.values[1] = self.drag_to * 100.0
         return self.values[index]
 
 
-def _run(monkeypatch, gripper=None, steps=40, confirm_at=None, quit_at=None,
-         target_fraction=0.9, force_n=10.0, clock=None, argv=None):
+#: A calibration file as ``read_calibration_file`` returns it, for ``--dry-run``
+#: (which never connects, so there is no ``gripper.config`` to borrow).
+CALIB_FILE = dict(zero_position_rad=POS_CLOSED_RAD, max_position_rad=POS_OPEN_RAD,
+                  rad_to_mm=RAD_TO_MM, kp=KP, kd=KD)
+
+
+def _run(monkeypatch, gripper=None, steps=40, drag_to=None, drag_tick=3,
+         quit_at=None, clock=None, speed=100.0, dry_run=False):
     """Run ``example 02``'s ``main()`` against fakes; return the pieces."""
     clock = clock or FakeClock()
     gripper = gripper or FakeGripper(position_rad=POS_OPEN_RAD + 0.3)
-    sim = FakeSim(clock, steps, confirm_at=confirm_at, quit_at=quit_at)
-    sliders = FakeSliders(target_fraction, force_n)
+    sim = FakeSim(clock, steps, quit_at=quit_at)
+    sliders = FakeSliders(drag_to=drag_to, drag_tick=drag_tick,
+                          tick_fn=lambda: sim.tick)
 
     args = SimpleNamespace(
         channel="can0", can_id=0x08, mst_id=0x18, calib=None,
-        urdf=None, headless=False, dry_run=False, status=False,
-        clear_fault=False, duration=None, force=force_n,
+        urdf=None, headless=False, dry_run=dry_run, status=False,
+        clear_fault=False, speed=speed, force=10.0,
     )
 
     monkeypatch.setattr(ex02, "parse_args", lambda: args)
@@ -241,10 +270,25 @@ def _run(monkeypatch, gripper=None, steps=40, confirm_at=None, quit_at=None,
         monotonic=clock.monotonic, sleep=lambda s: None))
     monkeypatch.setattr(ex02, "import_litegrip", lambda: SimpleNamespace(
         UnitConversion=SimpleNamespace(N_TO_NM=0.1)))
+    if dry_run:
+        monkeypatch.setattr(ex02, "choose_calibration_file",
+                            lambda requested: Path("/fake/calibration.json"))
+        monkeypatch.setattr(ex02, "read_calibration_file",
+                            lambda path: dict(CALIB_FILE))
 
     code = ex02.main()
     return SimpleNamespace(code=code, sim=sim, gripper=gripper, clock=clock,
                            sliders=sliders)
+
+
+def _worst_frame_demand(frames, kp: float, start_rad: float) -> float:
+    """The hardest single correction the loop asks the servo to make [Nm]."""
+    worst = 0.0
+    previous = start_rad
+    for frame in frames:
+        worst = max(worst, kp * abs(frame["q"] - previous) + abs(frame["tau"]))
+        previous = frame["q"]
+    return worst
 
 
 class TestIdleKeepAlive:
@@ -279,27 +323,100 @@ class TestIdleKeepAlive:
     def test_it_holds_a_current_command_without_stepping(self, monkeypatch):
         """Every frame has to be within the motor's reach of the last one."""
         run = _run(monkeypatch, steps=400)
-        previous = run.gripper.position_rad
-        for frame in run.gripper.frames:
-            demand = KP * abs(frame["q"] - previous) + abs(frame["tau"])
-            assert demand <= MOTOR_RATED_NM, \
-                f"一帧就要 {demand:.1f} Nm，超过电机额定的 {MOTOR_RATED_NM} Nm"
-            previous = frame["q"]
+        demand = _worst_frame_demand(run.gripper.frames, KP,
+                                     run.gripper.position_rad)
+        assert demand <= MOTOR_RATED_NM, \
+            f"一帧就要 {demand:.1f} Nm，超过电机额定的 {MOTOR_RATED_NM} Nm"
 
 
-class TestEnterDispatch:
-    def test_enter_sends_a_ramp_then_keeps_the_link_alive(self, monkeypatch):
-        run = _run(monkeypatch, steps=600, confirm_at=3, target_fraction=0.9)
+class TestItDoesNotMoveUntilTheSliderIsTouched:
+    """The behaviour the example was rewritten for.
+
+    Enabling the motor must not command anything: the example holds the
+    position it measured, the window shows that measurement, and the gripper
+    only moves once the slider is dragged.
+    """
+
+    def test_starting_up_commands_no_motion_at_all(self, monkeypatch):
+        run = _run(monkeypatch, steps=400)          # 2 s with the slider untouched
         assert run.gripper.frames
-        # The whole run, ramp included, must stay within the motor's reach of
-        # the previous frame — that is the property the step command broke.
-        previous = run.gripper.position_rad
         for frame in run.gripper.frames:
-            assert KP * abs(frame["q"] - previous) <= MOTOR_RATED_NM
-            previous = frame["q"]
+            assert frame["q"] == pytest.approx(run.gripper.position_rad), \
+                "滑条没动，目标却换了地方"
+            assert frame["dq"] == 0.0
+            assert frame["tau"] == 0.0
+
+    def test_the_window_shows_where_the_gripper_is(self, monkeypatch):
+        """The mirror, not a preview of the target.
+
+        The gripper is parked somewhere the slider does not point at, so a
+        window showing the *commanded* value would look different from one
+        showing the measurement.
+        """
+        parked = POS_OPEN_RAD + 0.3
+        run = _run(monkeypatch, steps=100,
+                   gripper=FakeGripper(position_rad=parked))
+        expected = ex02.rad_to_fraction(run.gripper, parked)
+        assert run.sim.mirrored, "窗口一帧都没被摆到真机的位置上"
+        assert all(f == pytest.approx(expected) for f in run.sim.mirrored), \
+            "窗口显示的不是实测位置"
+
+    def test_the_window_keeps_showing_the_measurement_while_it_moves(
+            self, monkeypatch):
+        """Even mid-drag: the window is a mirror, never the setpoint."""
+        run = _run(monkeypatch, steps=600, drag_to=0.9, drag_tick=3)
+        measured = ex02.rad_to_fraction(run.gripper, run.gripper.position_rad)
+        assert run.sim.mirrored
+        assert all(f == pytest.approx(measured) for f in run.sim.mirrored)
+
+    def test_the_slider_starting_value_is_not_a_command(self, monkeypatch):
+        """A slider parked away from the measured position moves nothing.
+
+        The start value comes off the measurement, but it does not have to:
+        what makes something a command is that its value *changed*.
+        """
+        gripper = FakeGripper(position_rad=POS_OPEN_RAD + 0.3)
+        run = _run(monkeypatch, gripper=gripper, steps=300)
+        start = ex02.rad_to_fraction(gripper, gripper.position_rad) * 100.0
+        assert run.sliders.created[0][3] == pytest.approx(start), \
+            "开度滑条没有从真机当前位置起步"
+        for frame in run.gripper.frames:
+            assert frame["q"] == pytest.approx(gripper.position_rad)
+
+    def test_the_gripper_only_starts_moving_after_the_drag(self, monkeypatch):
+        """The frames up to the drag all hold; the first that does not, moves.
+
+        Written against the frames themselves rather than against a slice of
+        them: how many frames the keeper gets out per loop iteration depends on
+        the clock's float arithmetic, and that is not what is being tested.
+        """
+        run = _run(monkeypatch, steps=600, drag_to=0.9, drag_tick=50)
+        parked = run.gripper.position_rad
+        moving = [i for i, f in enumerate(run.gripper.frames)
+                  if f["q"] != pytest.approx(parked)]
+        assert run.gripper.frames, "一帧都没发"
+        assert moving, "拖了之后也没动"
+        assert moving[0] > 10, \
+            f"拖动之前第 {moving[0]} 帧就开始动了"
+        assert all(f["q"] == pytest.approx(parked)
+                   for f in run.gripper.frames[:moving[0]])
+
+
+class TestDragDispatch:
+    """No key press: the drag is the command."""
+
+    def test_dragging_sends_a_limited_stream_then_keeps_the_link_alive(
+            self, monkeypatch):
+        run = _run(monkeypatch, steps=600, drag_to=0.9, drag_tick=3)
+        assert run.gripper.frames
+        assert run.sim.keys_emitted == 0, "这一档按过键？拖动本该是唯一输入"
+        demand = _worst_frame_demand(run.gripper.frames, KP,
+                                     run.gripper.position_rad)
+        assert demand <= MOTOR_RATED_NM, \
+            f"整个过程里最狠的一帧要 {demand:.1f} Nm，超过额定 {MOTOR_RATED_NM} Nm"
 
     def test_it_never_jumps_to_the_target_in_one_frame(self, monkeypatch):
-        run = _run(monkeypatch, steps=600, confirm_at=3, target_fraction=0.1)
+        run = _run(monkeypatch, steps=600, drag_to=0.1, drag_tick=3)
         if not run.gripper.frames:
             pytest.skip("这一档没有下发")
         first = run.gripper.frames[0]["q"]
@@ -307,9 +424,33 @@ class TestEnterDispatch:
             "第一帧就该从电机当前位置起步"
 
     def test_the_target_is_inside_the_calibrated_travel(self, monkeypatch):
-        run = _run(monkeypatch, steps=600, confirm_at=3, target_fraction=1.0)
+        run = _run(monkeypatch, steps=600, drag_to=1.0, drag_tick=3)
         for frame in run.gripper.frames:
             assert POS_OPEN_RAD - 1e-9 <= frame["q"] <= POS_CLOSED_RAD + 1e-9
+
+    def test_a_slow_speed_cap_reaches_the_motor(self, monkeypatch):
+        """--speed lowers the per-frame budget, and the frames show it."""
+        fast = _run(monkeypatch, steps=600, drag_to=0.9, drag_tick=3)
+        slow = _run(monkeypatch, steps=600, drag_to=0.9, drag_tick=3, speed=10.0)
+        assert fast.gripper.frames and slow.gripper.frames
+
+        def biggest_step(frames):
+            return max(abs(b["q"] - a["q"])
+                       for a, b in zip(frames, frames[1:]))
+
+        assert biggest_step(slow.gripper.frames) \
+            < biggest_step(fast.gripper.frames) / 5, \
+            "速度 % 调小了，每帧的增量却没跟着小下去"
+
+    def test_a_drag_force_is_only_pushed_in_the_closing_direction(self, monkeypatch):
+        """Opening with a feed-forward torque would fight the motor."""
+        gripper = FakeGripper(position_rad=POS_CLOSED_RAD - 0.2)
+        run = _run(monkeypatch, gripper=gripper, steps=600, drag_to=1.0,
+                   drag_tick=3)                       # drag towards open
+        moved = [f for f in run.gripper.frames
+                 if f["q"] != pytest.approx(gripper.position_rad)]
+        assert moved, "没动，这条用例没测到东西"
+        assert all(f["tau"] == 0.0 for f in moved), "张开方向也加了夹持力"
 
 
 class PollSchedule(FakeGripper):
@@ -347,14 +488,14 @@ class TestItWillNotActOnAnUnmeasuredPosition:
     ``MotorState._position`` starts at ``0.0`` (``litegrip/can/motor.py``) and is
     only moved by a real status frame, while ``GripperState.timestamp`` is the
     *local* clock — so the public snapshot cannot say how old it is, or whether it
-    was ever filled in.  Build a ramp's start and duration from one and the ramp
-    becomes a step aimed at 0 rad (5.5 % open on this calibration), which the
-    motor answers with ``kp × 1.7 rad ≈ 170 Nm`` against a ~10 Nm servo.  That is
+    was ever filled in.  Build a drag's start from one and the rate limit is
+    measuring from the wrong place, which is a step aimed at 0 rad (5.5 % open on
+    this calibration) — ``kp × 1.7 rad ≈ 170 Nm`` against a ~10 Nm servo.  That is
     the shape of "一开夹爪就起飞", so the reading is checked before it is trusted.
     """
 
     def test_no_frame_at_all_when_the_motor_never_answers(self, monkeypatch, capsys):
-        run = _run(monkeypatch, steps=300, confirm_at=5,
+        run = _run(monkeypatch, steps=300, drag_to=0.9, drag_tick=5,
                    gripper=FakeGripper(POS_OPEN_RAD + 0.3, answering=False))
         assert run.gripper.frames == [], (
             f"读不到状态帧还是发了 {len(run.gripper.frames)} 帧"
@@ -363,7 +504,7 @@ class TestItWillNotActOnAnUnmeasuredPosition:
 
     def test_the_unread_zero_is_never_commanded(self, monkeypatch):
         """``0.0`` means "never read", not "the jaws are at 0 rad"."""
-        run = _run(monkeypatch, steps=300, confirm_at=5,
+        run = _run(monkeypatch, steps=300, drag_to=0.9, drag_tick=5,
                    gripper=FakeGripper(POS_OPEN_RAD + 0.3, answering=False))
         zeros = [f for f in run.gripper.frames if abs(f["q"]) < 1e-6]
         assert not zeros, f"把「从没读到过」的 0.0 当目标发了 {len(zeros)} 帧"
@@ -379,7 +520,8 @@ class TestItWillNotActOnAnUnmeasuredPosition:
         """The keeper's already-latched frame is still safe to repeat — a *new*
         command is not, and must not be invented from the frozen cache."""
         gripper = PollSchedule(lambda n: n <= 2, position_rad=POS_OPEN_RAD + 0.3)
-        run = _run(monkeypatch, gripper=gripper, steps=300, confirm_at=3)
+        run = _run(monkeypatch, gripper=gripper, steps=300, drag_to=0.9,
+                   drag_tick=3)
         assert "不下发" in capsys.readouterr().out
         assert run.gripper.frames, "保活帧是锁位帧，读数冻结了也该照常重发"
         for frame in run.gripper.frames:
@@ -402,6 +544,15 @@ class TestFaultHandling:
         assert run.code == 1, "报故障却没有失败退出"
         assert run.gripper.disconnected
 
+    def test_a_drag_against_a_latched_fault_is_refused(self, monkeypatch, capsys):
+        """Nothing may be built on a position from a motor that ignores us."""
+        gripper = FakeGripper(position_rad=POS_OPEN_RAD + 0.3, error_code=0xD)
+        run = _run(monkeypatch, gripper=gripper, steps=300, drag_to=0.9,
+                   drag_tick=5)
+        out = capsys.readouterr().out
+        assert "故障" in out
+        assert run.code == 1
+
     def test_it_disconnects_even_when_nothing_was_sent(self, monkeypatch):
         run = _run(monkeypatch, steps=20)
         assert run.gripper.disconnected
@@ -421,6 +572,33 @@ class TestFaultHandling:
             "用了 stop()：它只发一帧零力矩，电机仍是使能态"
 
 
+class TestDryRun:
+    """``--dry-run`` runs the same loop with no SDK, no CAN and no window motor.
+
+    It has no measurement to mirror, so the window shows the commanded value —
+    and it must not pretend otherwise, nor send a single frame.
+    """
+
+    def test_it_sends_no_frame_and_needs_no_gripper(self, monkeypatch):
+        run = _run(monkeypatch, steps=300, drag_to=0.9, drag_tick=3, dry_run=True)
+        assert run.gripper.frames == [], "dry-run 下发了帧"
+        assert run.gripper.refreshes == [], "dry-run 碰了真机"
+
+    def test_it_still_follows_the_slider(self, monkeypatch):
+        """With no hardware, the run still walks the commanded position.
+
+        There is nothing to read here, so the drive starts from the slider's own
+        starting value — which is what ``make_sliders`` falls back to without a
+        measurement — and ends up at what was dragged to.
+        """
+        run = _run(monkeypatch, steps=400, drag_to=0.9, drag_tick=3, dry_run=True)
+        assert run.sim.mirrored[0] == pytest.approx(1.0), "起点不是滑条的起始开度"
+        assert run.sim.mirrored[-1] == pytest.approx(0.9, abs=0.02), \
+            "拖到 90% 之后命令值没有走到 90%"
+        assert all(0.0 <= f <= 1.0 for f in run.sim.mirrored), "开度跑出了 [0,1]"
+        assert len(run.sim.mirrored) > 100, "窗口没跟着跑"
+
+
 class TestStatusReportsMeasuredValues:
     """``--status`` is the tool for "it reads but I can't control it", so the
     numbers it prints have to be measurements.
@@ -438,7 +616,7 @@ class TestStatusReportsMeasuredValues:
         args = SimpleNamespace(
             channel="can0", can_id=0x08, mst_id=0x18, calib=None, urdf=None,
             headless=False, dry_run=False, status=True, clear_fault=False,
-            duration=None, force=10.0,
+            speed=100.0, force=10.0,
         )
         monkeypatch.setattr(ex02, "parse_args", lambda: args)
         monkeypatch.setattr(ex02, "open_real_gripper",
@@ -553,7 +731,6 @@ class TestItNeverLeavesTheMotorUnfed:
 
     def test_a_frame_goes_out_before_the_window_is_even_used(self, monkeypatch):
         run = _run(monkeypatch, steps=0)      # the window dies immediately
-        assert run.sim.commanded == [] or True
         assert len(run.gripper.frames) >= 1, \
             "使能之后、主循环之前一帧都没发——这段空窗就是通信超时故障的来源"
 
@@ -568,9 +745,9 @@ class TestItNeverLeavesTheMotorUnfed:
         monkeypatch.setattr(ex02, "parse_args", lambda: SimpleNamespace(
             channel="can0", can_id=0x08, mst_id=0x18, calib=None, urdf=None,
             headless=False, dry_run=False, status=False, clear_fault=False,
-            duration=None, force=10.0))
+            speed=100.0, force=10.0))
         monkeypatch.setattr(ex02, "open_real_gripper", lambda a, enable=True: gripper)
-        monkeypatch.setattr(ex02, "p", FakeSliders(0.5, 0.0))
+        monkeypatch.setattr(ex02, "p", FakeSliders())
         monkeypatch.setattr(ex02, "time", SimpleNamespace(
             monotonic=clock.monotonic, sleep=lambda s: None))
         monkeypatch.setattr(ex02, "import_litegrip", lambda: SimpleNamespace(
@@ -587,15 +764,19 @@ class TestCalibrationArithmetic:
     """The slider → rad path, with the hardware's real numbers."""
 
     def test_closed_and_open_map_to_the_travel_ends(self):
+        """Both ends land on the calibrated angles, to float round-off.
+
+        They used to be mapped through millimetres, which put the open end a
+        hair short (and, on a file whose ``rad_to_mm`` belongs to a different
+        ``max_stroke_mm`` than the SDK's default, stopped the slider reaching
+        the open end at all).  Normalising over the travel makes the ends the
+        ends; the 1e-12 tolerance is the subtraction's own round-off, not a
+        physical shortfall.
+        """
         gripper = FakeGripper()
-        assert ex02.fraction_to_target_rad(gripper, 0.0) == pytest.approx(POS_CLOSED_RAD)
-        # The open end lands a hair short of ``pos_open_rad``: the calibration
-        # file's own numbers disagree by 0.00003 rad (max_stroke_mm/rad_to_mm =
-        # 1.840209 rad of travel vs the recorded travel_range_rad of 1.840238).
-        # That is 2 µm of finger travel — far below anything that matters, but
-        # it is why this tolerance is not zero.
-        assert ex02.fraction_to_target_rad(gripper, 1.0) == pytest.approx(
-            POS_OPEN_RAD, abs=1e-3)
+        assert ex02.fraction_to_target_rad(gripper, 0.0) == POS_CLOSED_RAD
+        assert ex02.fraction_to_target_rad(
+            gripper, 1.0) == pytest.approx(POS_OPEN_RAD, abs=1e-12)
 
     def test_the_mapping_round_trips(self):
         gripper = FakeGripper()

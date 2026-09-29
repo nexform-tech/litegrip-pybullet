@@ -11,6 +11,7 @@
   add_hardware_args() --channel / --can-id / --mst-id / --calib
   choose_calibration_file() 定下这次用**哪一份**标定：--calib 指定，或当场从候选里
                      选。**不接受默认标定**，也不回退出厂标定
+  calibration_config()  把标定文件装成 ``gripper.config`` 的形状（--dry-run 用）
   open_real_gripper() 连接 → 载入并核实标定 → 使能，失败时给出可读的提示
   fresh_state()      等到一帧**新**的状态帧再读位置；等不到返回 None
                      （读真机位置只该走这里，别直接读 get_state() 的缓存）
@@ -39,9 +40,12 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 __all__ = [
     "CALIBRATIONS_DIR",
+    "NOMINAL_KD",
+    "NOMINAL_KP",
     "NOMINAL_STROKE_MM",
     "REQUIRED_CALIB_KEYS",
     "REQUIRED_SDK_API",
@@ -51,6 +55,7 @@ __all__ = [
     "add_hardware_args",
     "bootstrap_src",
     "calibration_candidates",
+    "calibration_config",
     "calibration_summary",
     "check_calibration",
     "check_calibration_matches_args",
@@ -269,7 +274,34 @@ _CALIB_FIELDS: tuple[tuple[str, str], ...] = (
 #: SDK ``GripperConfig.max_stroke_mm`` 的默认值 [mm]。标定文件里**没有**这一项
 #: （它是「名义行程」而不是量出来的尺寸），所以只读文件、拿不到 config 的
 #: ``--dry-run`` 用这个值做自洽性检查。
+#:
+#: ⚠️ 开度换算**不**用它。归一化开度按标定行程归一，见 :func:`rad_to_fraction`：
+#: 这个名义值和标定文件里 ``rad_to_mm`` 那套刻度是可以对不上的。
 NOMINAL_STROKE_MM = 120.0
+
+#: SDK ``GripperConfig`` 里 ``kp``/``kd`` 的默认值。标定文件里这两项**可选**，
+#: 缺了 SDK 就留着 config 上的原值（``load_calibration`` 只对出现在文件里的键
+#: ``setattr``），也就是这两个数。
+NOMINAL_KP = 100.0
+NOMINAL_KD = 2.0
+
+
+def calibration_config(data: dict, *, max_stroke_mm: float = NOMINAL_STROKE_MM):
+    """把一份标定文件装成 ``gripper.config`` 的形状。
+
+    ``--dry-run`` 不连真机、也就没有 SDK 的 ``GripperConfig``，但它走的正是这套
+    参数（两个端角、kp/kd），照样需要一个 config 来算。这里按
+    :data:`_CALIB_FIELDS` 那张表装，字段名不另写一份；缺的可选字段沿用 SDK 的
+    默认值（见 :data:`NOMINAL_KP`）。``max_stroke_mm`` 不在标定文件里，用名义值
+    ——它只进 :func:`check_calibration` 的自洽性检查，不进开度换算。
+
+    只用于「不碰真机、但要算同一套数」的场合。真机路径上用的永远是 SDK 自己那份
+    ``gripper.config``——那份是 :func:`load_chosen_calibration` 核实过的。
+    """
+    values: dict[str, object] = {"kp": NOMINAL_KP, "kd": NOMINAL_KD}
+    values.update({attr: data[key] for key, attr in _CALIB_FIELDS if key in data})
+    values["max_stroke_mm"] = max_stroke_mm
+    return SimpleNamespace(**values)
 
 
 def calibration_candidates(directories=None) -> list[Path]:
@@ -647,7 +679,13 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
     cfg = gripper.config
     # kp/kd 一起打出来：它们是标定文件里的值（也是保持帧的刚度），改了标定之后
     # 「手感怎么变了」这个问题，第一件要看的就是这两个数。
-    print(f"[真机] 已使能 · 行程 {cfg.max_stroke_mm:.1f} mm（SDK 刻度）"
+    #
+    # 行程打的是**实测的那两个角之差**，不是 ``max_stroke_mm``：后者是 SDK 的名义
+    # 默认值，``load_calibration`` 不写它，所以它和这份标定对不对得上完全看标定是
+    # 怎么做的（见 :func:`rad_to_fraction`）。打一个可能对不上的名义值，等于把
+    # 操作员往错误的方向引。
+    print(f"[真机] 已使能 · 行程 {cfg.pos_closed_rad - cfg.pos_open_rad:.4f} rad"
+          f"（{cfg.pos_closed_rad:+.4f} → {cfg.pos_open_rad:+.4f}）"
           f" · rad_to_mm={cfg.rad_to_mm:.2f}"
           f" · kp={cfg.kp:g} kd={cfg.kd:g}")
     return gripper
@@ -656,23 +694,26 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
 def fraction_to_target_rad(gripper, fraction: float) -> float:
     """归一化开度 → 真机的电机目标角 [rad]。
 
-    和 SDK 的 ``goto(position_mm)`` 用同一套换算，只是分两步写出来：
+    **归一化开度就是标定行程的百分比**：``0`` 是标定出来的闭合位，``1`` 是标定
+    出来的张开位，中间线性。
 
-        position_mm  = fraction × max_stroke_mm
-        position_rad = pos_closed_rad − position_mm / rad_to_mm
+        position_rad = pos_closed_rad − fraction × (pos_closed_rad − pos_open_rad)
 
-    注意 SDK 的毫米是**标定过的刻度**（``max_stroke_mm`` 名义 120），不是物理
-    钳口间隙；两侧唯一对齐的量是这里的归一化开度。
+    ⚠️ 这里**不经过毫米**，也不碰 ``cfg.max_stroke_mm``。这正是它与
+    ``goto(position_mm)`` 的唯一区别，理由见 :func:`rad_to_fraction`：
+    ``position_mm`` 那把尺子是按**标定时那个** ``max_stroke_mm`` 定的，而
+    ``load_calibration()`` 从不写这个字段，它一直是 SDK 的默认值——两者对不上
+    的时候，走毫米的换算会在中途饱和。按行程归一没有这个前提。
 
-    钳位沿用 ``goto`` 的写法，也就继承了它的前提：``pos_open_rad`` 必须是更**负**
-    的那个（标定后如此）。SDK 的出厂默认配置把 ``pos_open_rad`` 写成 ``+1.14``，
-    与 ``goto`` 的符号约定相矛盾，此时结果没有意义——所以真机样例在使能前会用
+    前提是标定自洽（``pos_closed_rad`` 比 ``pos_open_rad`` 更**正**，标定后如此）。
+    SDK 的出厂默认配置把 ``pos_open_rad`` 写成 ``+1.14``，与 ``goto`` 的符号约定
+    相矛盾，此时两个函数的结果都没有意义——所以真机样例在使能前会用
     :func:`check_calibration` 挡掉这种配置，而不是硬发一条越界的角度。
     """
     cfg = gripper.config
-    position_mm = max(0.0, min(1.0, float(fraction))) * cfg.max_stroke_mm
-    position_rad = cfg.pos_closed_rad - position_mm / cfg.rad_to_mm
-    return max(cfg.pos_open_rad, min(cfg.pos_closed_rad, position_rad))
+    travel = cfg.pos_closed_rad - cfg.pos_open_rad
+    fraction = max(0.0, min(1.0, float(fraction)))
+    return cfg.pos_closed_rad - fraction * travel
 
 
 def check_calibration_values(pos_closed_rad: float, pos_open_rad: float,
@@ -708,12 +749,32 @@ def check_calibration(gripper) -> None:
 
 
 def rad_to_fraction(gripper, position_rad: float) -> float:
-    """真机的电机角 [rad] → 归一化开度（:func:`fraction_to_target_rad` 的逆）。"""
+    """真机的电机角 [rad] → 归一化开度（:func:`fraction_to_target_rad` 的逆）。
+
+    按**标定行程**归一，不按毫米——理由在下面，值得读完再改成「除以
+    ``max_stroke_mm``」的写法。
+
+    ⚠️ 为什么不走毫米。SDK 的毫米刻度由 ``rad_to_mm`` 定，而 ``rad_to_mm`` 是
+    标定那一刻用**当时那个** ``max_stroke_mm`` 算出来的（``gripper.calibrate()``
+    里就是 ``max_stroke_mm / travel``）。可是 ``load_calibration()`` 从不写
+    ``config.max_stroke_mm``，它一直是 ``GripperConfig`` 的默认值 120.0。两者只要
+    对不上，``position_mm / max_stroke_mm`` 这条映射就会在中途**饱和**：本机
+    2026-09-28 那份标定文件的 ``rad_to_mm`` 对应 86 mm 刻度，于是行程走到
+    ``86 / 120 = 72%`` 就顶住了——滑条再往上推目标角不再变化，窗口里的仿真手指
+    也张不到底，而且拖到 50% 实际给的是全行程的 70%。按行程归一没有这个前提：
+    它只用 ``pos_closed_rad`` / ``pos_open_rad``，而这两个角每次标定都实测。
+
+    （标定自洽、即 ``rad_to_mm × travel == max_stroke_mm`` 时，两种写法结果相同；
+    差别只在它们对不上的时候。）
+
+    行程非正时返回 ``0.0``：标定本身不自洽，真机路径上 :func:`check_calibration`
+    会先把它挡掉，这里只是不做除法。
+    """
     cfg = gripper.config
-    position_mm = (cfg.pos_closed_rad - float(position_rad)) * cfg.rad_to_mm
-    if cfg.max_stroke_mm <= 0.0:
+    travel = cfg.pos_closed_rad - cfg.pos_open_rad
+    if travel <= 0.0:
         return 0.0
-    return max(0.0, min(1.0, position_mm / cfg.max_stroke_mm))
+    return max(0.0, min(1.0, (cfg.pos_closed_rad - float(position_rad)) / travel))
 
 
 #: 读真机状态时最多等一帧状态帧的时间 [s]。SDK 的 ``get_state(wait=True)`` 内部

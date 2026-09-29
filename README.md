@@ -72,6 +72,11 @@ SDK millimetres and the physical jaw gap are not related by a unit conversion �
 they are different quantities. Only the normalised opening means the same thing
 on both sides.
 
+The `120` is the SDK's *default* `max_stroke_mm`; a calibration file carries
+whatever scale it was saved with, so the examples convert between radians and the
+normalised opening directly rather than through millimetres. See
+[One opening, three notations](examples/README.md#one-opening-three-notations).
+
 ## Status
 
 What has been verified, and what has not:
@@ -83,7 +88,7 @@ What has been verified, and what has not:
 | Speed-limited motion | ✅ Verified | `tests/test_sim.py`: full stroke 1.00 s of ramp + ~0.13 s of servo settling, no overshoot |
 | Force cap and friction grasping | ✅ Verified | Holds 5 N against a 10 N grip, slips at 15 N; only the fingers touch the part |
 | Example 01 | ✅ Verified | Runs headless, exits 0, all four demos asserted in `tests/test_examples_cli.py` |
-| Example 02 (simulation → hardware) | ⚠️ **Partially verified** | Run against a real gripper on `can0`, where it latched a motor fault; the ramp fix below is covered by `tests/test_example02_stream.py` but has **not** itself been run against hardware |
+| Example 02 (simulation → hardware) | ⚠️ **Partially verified** | Run against a real gripper on `can0`, where it latched a motor fault; the ramp fix below is covered by `tests/test_example02_stream.py` but has **not** itself been run against hardware. The drag-driven interaction (no send key, an enabled-but-stationary start, the speed slider) has likewise only been exercised in tests, as have the travel-normalised slider mapping and the deceleration before arrival |
 | Example 02 `--status` diagnostics | ⚠️ **Partially verified** | On a real gripper on 2026-09-28 it read a live status frame, the position, the error code and the DM registers without enabling or moving the motor (exit 0); the reporting path for a **latched fault**, and clearing one, have not been exercised on hardware |
 | Example 03 (hardware → simulation) | ⚠️ **Partially verified** | The read-only mirror path was run against a real gripper on `can0`; `--zero-gravity` and `--passive` were not |
 | Real-hardware motion commands | ⚠️ **Partially verified** | A step-command stream was sent to hardware from an earlier revision of example 02 and faulted the motor; the ramped replacement has not been run yet |
