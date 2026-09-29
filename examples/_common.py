@@ -7,6 +7,8 @@
   ensure_deps()      缺 pybullet 时自动改用仓库自带 .venv 重跑
   import_litegrip()  导入真机 SDK（已安装 / 同级 lite-grip 仓库 / $LITEGRIP_SDK_DIR）
   check_sdk_api()    核对 SDK 有没有本仓库依赖的公开接口，缺了就在启动时停下
+  import_trajectory_litegrip()  03 用的**另一份** SDK：带轨迹录制/回放的那份
+                     （同级 litegrip-python 仓库 / $LITEGRIP_TRAJ_SDK_DIR）
   add_common_args()  --urdf / --headless
   add_hardware_args() --channel / --can-id / --mst-id / --calib
   choose_calibration_file() 定下这次用**哪一份**标定：--calib 指定，或当场从候选里
@@ -51,6 +53,7 @@ __all__ = [
     "REQUIRED_SDK_API",
     "SAFETY_BANNER",
     "SIM_CALIBRATION_MARKER",
+    "TRAJECTORY_SDK_API",
     "add_common_args",
     "add_hardware_args",
     "bootstrap_src",
@@ -61,19 +64,23 @@ __all__ = [
     "check_calibration_matches_args",
     "check_calibration_values",
     "check_sdk_api",
+    "check_trajectory_sdk_api",
     "choose_calibration_file",
     "ensure_deps",
     "fraction_to_target_rad",
     "fresh_state",
     "import_litegrip",
+    "import_trajectory_litegrip",
     "load_chosen_calibration",
     "missing_sdk_api",
+    "missing_trajectory_sdk_api",
     "open_real_gripper",
     "rad_to_fraction",
     "read_calibration_file",
     "request_status_frame",
     "sdk_dir",
     "status_line",
+    "trajectory_sdk_dir",
 ]
 
 #: 真机样例开跑前打印的横幅。
@@ -206,6 +213,155 @@ def check_sdk_api(litegrip) -> None:
           "   带这些接口的版本也还没发布过。请改用本地检出：\n"
           "     python3 -m pip install -e /path/to/lite-grip          # 或\n"
           "     export LITEGRIP_SDK_DIR=/path/to/lite-grip\n"
+        + (f"   （这次导入到的是：{directory}）" if directory is not None else "")
+    )
+
+
+#: **03（轨迹录制/回放）**要的 SDK 公开接口。
+#:
+#: 它和 :data:`REQUIRED_SDK_API` 那份**不在同一份检出里**，这是写在这里最要紧的
+#: 一句话：轨迹录制/回放只在 ``litegrip-python`` 那条线上，而
+#: ``refresh_status`` / ``data_age_s`` 那几个只在 ``lite-grip`` 这条线上。两份包的
+#: ``__version__`` 都是 ``2.2.0``，**看版本号分不出来**——只能按能力分辨，所以两条
+#: 线各自列一份清单、各自报缺什么。
+TRAJECTORY_SDK_API: tuple[tuple[str, str], ...] = (
+    ("LiteGrip.record_start",
+     "在后台开始录制；zero_gravity=True 时由它自己流零力矩帧"),
+    ("LiteGrip.record_stop", "停止录制并取回轨迹"),
+    ("LiteGrip.play_start",
+     "在后台开始回放——主循环才腾得出手同步刷仿真（play() 会阻塞到放完）"),
+    ("LiteGrip.play_stop", "停止回放，并把夹爪留在最后一个目标位上"),
+    ("LiteGrip.trajectory_status",
+     "录制/回放的进度：active / completed / openness"),
+    ("Trajectory.load", "读回一段 ``.lgt``（纯文件 I/O，不碰 CAN）"),
+)
+
+
+def trajectory_sdk_dir() -> Path | None:
+    """带轨迹录制/回放的 SDK 目录，找不到返回 ``None``。
+
+    顺序：``$LITEGRIP_TRAJ_SDK_DIR`` → 同级 ``litegrip-python`` 仓库 →
+    已安装的 ``litegrip``。
+
+    为什么**不**复用 :func:`sdk_dir`、也不复用 ``$LITEGRIP_SDK_DIR``：那条路是给
+    04/05 找「带新鲜度接口」的那份的，而 :func:`check_sdk_api` 会在启动时拦下不带
+    那些接口的 SDK。把一个变量同时当成两条线的入口，结果就是把 ``$LITEGRIP_SDK_DIR``
+    指向轨迹那份之后，04/05 反而一开跑就退出。两个变量、两份清单，各自点名。
+    """
+    env = os.environ.get("LITEGRIP_TRAJ_SDK_DIR")
+    if env:
+        return Path(env).expanduser()
+    # 同级检出：``litegrip-python`` 是 src 布局（包在 src/litegrip），也接受把包直接
+    # 放在仓库根下的布局——两种都试，免得只认一种。
+    sibling = _REPO_ROOT.parent / "litegrip-python"
+    for candidate in (sibling / "src", sibling):
+        if (candidate / "litegrip" / "__init__.py").is_file():
+            return candidate
+    try:
+        import litegrip  # noqa: F401
+
+        return Path(litegrip.__file__).resolve().parent.parent
+    except Exception:
+        return None
+
+
+def missing_trajectory_sdk_api(litegrip) -> list[str]:
+    """已导入的 SDK 里缺哪些轨迹接口（按 :data:`TRAJECTORY_SDK_API` 的顺序）。"""
+    missing: list[str] = []
+    for path, _why in TRAJECTORY_SDK_API:
+        owner, _, attr = path.partition(".")
+        if not hasattr(getattr(litegrip, owner, None), attr):
+            missing.append(path)
+    return missing
+
+
+def _load_package_from(directory):
+    """从指定目录显式加载 ``litegrip`` 包，不走 ``import litegrip``。
+
+    为什么必须显式加载：``pip install -e`` 装的那份会注册一个 **meta path
+    finder**，它的优先级高于 ``sys.path``——所以「把轨迹那份插到 sys.path 最前面」
+    在装了 editable 版的机器上一点用都没有，``import litegrip`` 拿到的还是那份缺
+    轨迹接口的。这里是同一个包名的两份检出并存，只能按目录点名加载。
+
+    副作用是 ``sys.modules["litegrip"]`` 被换掉（包括它已经导入过的子模块）：03 这
+    个进程从这一句起就用这一份，这正是想要的。别在同一个进程里再用另一份。
+    """
+    import importlib.util
+
+    init = Path(directory) / "litegrip" / "__init__.py"
+    if not init.is_file():
+        return None
+    for name in [m for m in sys.modules if m == "litegrip"
+                 or m.startswith("litegrip.")]:
+        del sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        "litegrip", init, submodule_search_locations=[str(init.parent)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["litegrip"] = module       # 子模块与 dataclass 都要先看到它
+    try:
+        spec.loader.exec_module(module)
+    except Exception:                      # 导入一半失败：别留下半个包
+        sys.modules.pop("litegrip", None)
+        raise
+    return module
+
+
+def import_trajectory_litegrip():
+    """导入**带轨迹接口**的那份 SDK，失败时给出安装提示并退出。
+
+    与 :func:`import_litegrip` 分开：03 要的和 04/05 要的不是同一份检出（见
+    :data:`TRAJECTORY_SDK_API`），这里只管把 ``litegrip`` 从轨迹那份的目录上导进来。
+
+    要先找目录再显式加载，不能靠目录顺序——理由见 :func:`_load_package_from`。
+
+    Returns:
+        已导入的 ``litegrip`` 模块。
+    """
+    directory = trajectory_sdk_dir()
+    if directory is not None:
+        try:
+            module = _load_package_from(directory)
+        except Exception as exc:           # 那份检出自己炸了（语法错误等）
+            raise SystemExit(
+                f"从 {directory} 加载 litegrip 失败：{exc}"
+            ) from exc
+        if module is not None:
+            return module
+    try:
+        import litegrip
+    except ImportError as exc:
+        raise SystemExit(
+            "找不到带轨迹录制/回放的 litegrip SDK。\n"
+            "   本样例（03）用到的 record_start / play_start / Trajectory 这些接口\n"
+            "   只在那份 SDK 检出里，**不在** 04/05 用的那份里（两份都是 2.2.0，\n"
+            "   看版本号分不出来）。三种任选其一：\n"
+            "   1) python3 -m pip install -e /path/to/litegrip-python\n"
+            "   2) export LITEGRIP_TRAJ_SDK_DIR=/path/to/litegrip-python/src\n"
+            "   3) 把 litegrip-python 仓库克隆到本仓库的同级目录\n"
+            f"   （原始错误：{exc}）"
+        ) from exc
+    return litegrip
+
+
+def check_trajectory_sdk_api(litegrip) -> None:
+    """缺轨迹接口就带着「该用哪份 SDK」退出（``SystemExit``）。
+
+    和 :func:`check_sdk_api` 一样**不保留降级路径**：这些接口没有替代品——录制是
+    SDK 在后台线程里按自己的节拍采样和发帧的，自己拿 ``send_mit_frame`` 拼一个循环
+    只会得到一份节拍对不上的样本。宁可现在停。
+    """
+    missing = missing_trajectory_sdk_api(litegrip)
+    if not missing:
+        return
+    why = dict(TRAJECTORY_SDK_API)
+    directory = trajectory_sdk_dir()
+    raise SystemExit(
+        "这份 litegrip SDK 缺少轨迹录制/回放的公开接口：\n"
+        + "".join(f"     • {path} —— {why[path]}\n" for path in missing)
+        + "   这些接口在 litegrip-python 那条线上；04/05 用的那份（带\n"
+          "   refresh_status() / data_age_s 的）没有它们。请指到轨迹那份：\n"
+          "     python3 -m pip install -e /path/to/litegrip-python     # 或\n"
+          "     export LITEGRIP_TRAJ_SDK_DIR=/path/to/litegrip-python/src\n"
         + (f"   （这次导入到的是：{directory}）" if directory is not None else "")
     )
 

@@ -786,6 +786,68 @@ class TestSdkApiCheck:
         assert "pip install -e" in message
 
 
+def _traj_sdk(*absent: str) -> SimpleNamespace:
+    """A stand-in for the *trajectory* SDK, lacking the named members.
+
+    Built the same way as :func:`_sdk`, off ``TRAJECTORY_SDK_API``.  The two
+    lists describe two different packages that happen to share a name, so the
+    two helpers must not be interchangeable.
+    """
+    drop = set(absent)
+    owners: dict = {"LiteGrip": {}, "Trajectory": {}}
+    for path, _why in _common.TRAJECTORY_SDK_API:
+        if path in drop:
+            continue
+        owner, _, attr = path.partition(".")
+        owners[owner][attr] = True
+    return SimpleNamespace(**{name: SimpleNamespace(**members)
+                              for name, members in owners.items()})
+
+
+class TestTrajectorySdkApiCheck:
+    """03 refuses to run on the SDK that 04/05 use — loudly, at startup, naming
+    the missing member and which checkout has it.
+
+    There is no degraded path here: the recording loop and the replay loop are
+    both the SDK's own background threads, timed to its own clock.  Hand-rolling
+    either out of ``send_mit_frame`` would produce samples on a different beat
+    than they were taken on, so the example stops instead.
+    """
+
+    def test_a_complete_sdk_passes(self):
+        sdk = _traj_sdk()
+        assert _common.missing_trajectory_sdk_api(sdk) == []
+        _common.check_trajectory_sdk_api(sdk)       # must not raise
+
+    def test_every_missing_member_is_named(self):
+        sdk = _traj_sdk(*[path for path, _ in _common.TRAJECTORY_SDK_API])
+        assert _common.missing_trajectory_sdk_api(sdk) == [
+            path for path, _ in _common.TRAJECTORY_SDK_API]
+
+    @pytest.mark.parametrize("absent",
+                             [path for path, _ in _common.TRAJECTORY_SDK_API])
+    def test_one_missing_member_is_reported_alone(self, absent):
+        assert _common.missing_trajectory_sdk_api(_traj_sdk(absent)) == [absent]
+
+    def test_it_says_which_checkout_to_point_at(self, monkeypatch):
+        monkeypatch.delenv("LITEGRIP_TRAJ_SDK_DIR", raising=False)
+        with pytest.raises(SystemExit) as excinfo:
+            _common.check_trajectory_sdk_api(_traj_sdk("LiteGrip.record_start"))
+        message = str(excinfo.value)
+        assert "LiteGrip.record_start" in message
+        assert "LITEGRIP_TRAJ_SDK_DIR" in message
+        assert "litegrip-python" in message
+        # ...and says which SDK the reader probably has, or "install the other
+        # one" reads as "your install is broken".
+        assert "refresh_status" in message
+
+    def test_the_two_sdks_are_not_interchangeable(self):
+        """Each check must fail on the other's package.  If either passed on
+        both, the wrong-SDK failure would be silent again."""
+        assert _common.missing_trajectory_sdk_api(_sdk()) != []
+        assert _common.missing_sdk_api(_traj_sdk()) != []
+
+
 class TestStatusLine:
     def test_contains_the_opening_and_aperture(self):
         line = _common.status_line("仿真", fraction=0.5, aperture_mm=44.3)
@@ -863,6 +925,120 @@ class TestArgParsers:
     def test_safety_banner_warns_about_real_motion(self):
         assert "真机" in _common.SAFETY_BANNER
         assert "Esc" in _common.SAFETY_BANNER
+
+
+class TestTrajectorySdkDiscovery:
+    """03 finds its SDK the same way 01-02 find theirs, on its own variable.
+
+    Two variables, not one: ``LITEGRIP_SDK_DIR`` is the first thing
+    :func:`_common.sdk_dir` looks at, so pointing it at the trajectory checkout
+    would drag 04/05 over too — and they stop at startup there, because that
+    package has no ``refresh_status``.
+    """
+
+    def test_its_own_env_var_wins(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("LITEGRIP_TRAJ_SDK_DIR", str(tmp_path))
+        assert _common.trajectory_sdk_dir() == tmp_path
+
+    def test_it_ignores_the_other_variable(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("LITEGRIP_SDK_DIR", str(tmp_path))
+        monkeypatch.delenv("LITEGRIP_TRAJ_SDK_DIR", raising=False)
+        assert _common.trajectory_sdk_dir() != tmp_path
+
+    def test_the_other_variable_does_not_move_the_freshness_sdk(self, monkeypatch,
+                                                               tmp_path):
+        monkeypatch.setenv("LITEGRIP_TRAJ_SDK_DIR", str(tmp_path))
+        monkeypatch.delenv("LITEGRIP_SDK_DIR", raising=False)
+        assert _common.sdk_dir() != tmp_path
+
+    def test_a_discovered_checkout_holds_the_package(self, monkeypatch):
+        """Whatever comes back when nothing overrides it has to be usable: a
+        directory without ``litegrip/__init__.py`` in it would send the import
+        straight back to the other SDK."""
+        monkeypatch.delenv("LITEGRIP_TRAJ_SDK_DIR", raising=False)
+        found = _common.trajectory_sdk_dir()
+        assert found is None or Path(found).is_dir()
+        if found is not None:
+            assert (Path(found) / "litegrip" / "__init__.py").is_file()
+
+
+class TestLoadingTheOtherCheckout:
+    """Two packages named ``litegrip`` on one machine, and 03 must get the right
+    one.
+
+    ``pip install -e`` registers a meta path finder whose priority sits above
+    ``sys.path``, so ``sys.path.insert(0, trajectory_checkout)`` changes nothing
+    — the import still resolves to the installed one.  Loading by directory is
+    the only thing that works, which is why :func:`_common._load_package_from`
+    exists rather than a ``sys.path`` tweak.
+    """
+
+    @pytest.fixture
+    def clean_litegrip(self):
+        """Restore ``sys.modules['litegrip*']`` however the test left it.
+
+        Loading a throwaway package under that name replaces whatever the rest
+        of the session imported, and this file shares the process with tests
+        that use the real one.
+        """
+        def snapshot():
+            return {name: module for name, module in sys.modules.items()
+                    if name == "litegrip" or name.startswith("litegrip.")}
+
+        def drop():
+            for name in [n for n in sys.modules
+                         if n == "litegrip" or n.startswith("litegrip.")]:
+                del sys.modules[name]
+
+        saved = snapshot()
+        drop()
+        try:
+            yield
+        finally:
+            drop()
+            sys.modules.update(saved)
+
+    @pytest.fixture
+    def throwaway(self, tmp_path) -> Path:
+        package = tmp_path / "litegrip"
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            "MARKER = 'loaded from the directory'\n", encoding="utf-8")
+        return tmp_path
+
+    def test_it_loads_the_package_in_the_given_directory(self, throwaway,
+                                                         clean_litegrip):
+        module = _common._load_package_from(throwaway)
+        assert module is not None
+        assert module.MARKER == "loaded from the directory"
+        assert sys.modules["litegrip"] is module, "加载完没挂到 sys.modules 上"
+
+    def test_it_returns_none_when_there_is_no_package(self, tmp_path,
+                                                      clean_litegrip):
+        assert _common._load_package_from(tmp_path) is None
+
+    def test_the_env_var_is_what_the_import_follows(self, monkeypatch, throwaway,
+                                                    clean_litegrip):
+        """End to end: the variable 03 documents is the one the loader obeys,
+        even on a machine where the other SDK is installed and importable."""
+        monkeypatch.setenv("LITEGRIP_TRAJ_SDK_DIR", str(throwaway))
+        assert _common.import_trajectory_litegrip().MARKER == \
+            "loaded from the directory"
+
+    def test_a_broken_checkout_is_reported_rather_than_skipped(self, monkeypatch,
+                                                               tmp_path,
+                                                               clean_litegrip):
+        """A checkout that fails to load must say so.  Falling through to the
+        installed SDK would run 03 against the wrong package and blame it for
+        the missing API."""
+        package = tmp_path / "litegrip"
+        package.mkdir()
+        (package / "__init__.py").write_text("this is not python(\n",
+                                             encoding="utf-8")
+        monkeypatch.setenv("LITEGRIP_TRAJ_SDK_DIR", str(tmp_path))
+        with pytest.raises(SystemExit) as excinfo:
+            _common.import_trajectory_litegrip()
+        assert str(tmp_path) in str(excinfo.value)
 
 
 class TestSdkDiscovery:

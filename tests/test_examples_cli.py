@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = REPO_ROOT / "examples"
 EXAMPLE_01 = EXAMPLES / "01_hello_sim.py"      # read the state, no motion
 EXAMPLE_02 = EXAMPLES / "02_move_sim.py"       # speed-limited travel, positioning
-EXAMPLE_03 = EXAMPLES / "03_grasp.py"          # grasp, friction limit, release
+EXAMPLE_03 = EXAMPLES / "03_trajectory.py"     # record a hand-taught motion, replay it
 EXAMPLE_04 = EXAMPLES / "04_mirror_real.py"    # hardware → simulation
 EXAMPLE_05 = EXAMPLES / "05_dual_control.py"   # simulation → hardware
 
@@ -85,11 +85,12 @@ def output_of(result: subprocess.CompletedProcess) -> str:
 
 #: The flags that make the simulated runs quick (~4 s instead of ~10 s) without
 #: changing what they demonstrate: the speed limit is what the demo is about, so
-#: raising it is fair game, and the hold time is only for watching.  01 takes no
-#: options beyond the ones every example shares, and --hold belongs to 03 alone.
+#: raising it is fair game.  01 takes no options beyond the ones every example
+#: shares.  03 is not here at all -- with no trajectory SDK on this machine its
+#: runs stop at startup, and the one path that does run needs a ``.lgt`` fixture
+#: (see ``TestExample03Trajectory``).
 FAST_HELLO = ("--headless",)
 FAST_MOVE = ("--headless", "--speed", "0.2")
-FAST_GRASP = ("--headless", "--speed", "0.2", "--hold", "0.2")
 
 
 @pytest.fixture(scope="module")
@@ -108,10 +109,71 @@ def fast_move() -> subprocess.CompletedProcess:
     return run(EXAMPLE_02, *FAST_MOVE)
 
 
+#: 03 needs the *other* SDK checkout -- the one with the trajectory API.  Only
+#: that one can write the ``.lgt`` fixture the offline run replays, and only that
+#: one can load it back, so the run tests below skip where it is absent (CI is
+#: exactly that case).  The loop itself is covered unconditionally in
+#: ``tests/test_example03_loop.py`` against a stand-in SDK.
+TRAJECTORY_SDK = REPO_ROOT.parent / "litegrip-python" / "src"
+
+#: A trajectory short enough to replay in well under a second.
+FIXTURE_RATE_HZ = 100.0
+FIXTURE_SAMPLES = 50
+
+#: Sentinel the fixture writer prints when there is no SDK to write with, as
+#: opposed to anything else going wrong.
+NO_SDK = "NO-TRAJECTORY-SDK: "
+
+
 @pytest.fixture(scope="module")
-def fast_grasp() -> subprocess.CompletedProcess:
-    """One 03 run, shared the same way."""
-    return run(EXAMPLE_03, *FAST_GRASP)
+def trajectory_file(tmp_path_factory) -> str:
+    """A ``.lgt`` written by the SDK itself, so the format is its own.
+
+    These samples were never on a gripper: 50 of them, opening 0.2 → 0.8 over
+    half a second.  Writing them through ``Trajectory.save`` rather than by hand
+    is what keeps this from being a test of my guess at the file format — and it
+    is why this fixture skips where that SDK is absent, which is every machine
+    that is not this bench and every CI runner.
+    """
+    if not (TRAJECTORY_SDK / "litegrip" / "__init__.py").is_file():
+        pytest.skip(f"要有 {TRAJECTORY_SDK} 才能写出并读回一段 .lgt")
+    workdir = tmp_path_factory.mktemp("traj")
+    path = workdir / "fixture"
+    script = workdir / "write_fixture.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(EXAMPLES)!r})\n"
+        "from _common import import_trajectory_litegrip\n"
+        "try:\n"
+        "    import_trajectory_litegrip()\n"
+        "except SystemExit as exc:\n"
+        # Not a test failure: this machine has no trajectory SDK.  Reported as a
+        # skip, and anything else the script does is still a failure, so a real
+        # mistake in here cannot hide behind this.
+        f"    print({NO_SDK!r} + str(exc))\n"
+        "    raise SystemExit(0)\n"
+        "from litegrip.trajectory import Trajectory, TrajectorySample\n"
+        f"n = {FIXTURE_SAMPLES}\n"
+        f"hz = {FIXTURE_RATE_HZ:g}\n"
+        "samples = [TrajectorySample(t=i / hz, openness=0.2 + 0.6 * i / (n - 1),\n"
+        "                            position_rad=1.2 - 0.6 * i / (n - 1))\n"
+        "           for i in range(n)]\n"
+        "traj = Trajectory(samples=samples, sample_hz=hz, can_id=0x08,\n"
+        "                  pos_closed_rad=1.775959, pos_open_rad=-0.064279,\n"
+        "                  rad_to_mm=65.21, mount='normal')\n"
+        f"print(traj.save({str(path)!r}))\n",
+        encoding="utf-8",
+    )
+    written = subprocess.run(
+        [sys.executable, str(script)], cwd=str(REPO_ROOT), timeout=TIMEOUT_S,
+        capture_output=True, text=True,
+        env={**os.environ, "LITEGRIP_PYBULLET_REEXEC": "1"},
+    )
+    assert written.returncode == 0, written.stdout + written.stderr
+    first = written.stdout.strip().splitlines()[0] if written.stdout.strip() else ""
+    if first.startswith(NO_SDK):
+        pytest.skip(first[len(NO_SDK):].strip())
+    return written.stdout.strip().splitlines()[-1]
 
 
 @pytest.mark.parametrize("script", ALL_EXAMPLES, ids=lambda p: p.name)
@@ -127,9 +189,10 @@ class TestHelp:
         assert "--headless" in result.stdout
 
 
-@pytest.mark.parametrize("script", [EXAMPLE_05, EXAMPLE_04], ids=lambda p: p.name)
+@pytest.mark.parametrize("script", [EXAMPLE_05, EXAMPLE_04, EXAMPLE_03],
+                         ids=lambda p: p.name)
 class TestHardwareFlags:
-    """Only 04 and 05 take CAN options."""
+    """Only 03, 04 and 05 touch the hardware, so only they take CAN options."""
 
     def test_can_flags_are_documented(self, script):
         result = run(script, "--help")
@@ -235,41 +298,130 @@ class TestExample02MoveSim:
         assert "URDF" in output_of(result) or "urdf" in output_of(result)
 
 
-class TestExample03Grasp:
-    """03 is the one that grips, pulls and lets go."""
+class TestExample03Trajectory:
+    """03 records a motion on the hardware and replays it into both targets.
 
-    def test_headless_run_succeeds(self, fast_grasp):
-        assert fast_grasp.returncode == 0, output_of(fast_grasp)
+    The one path that runs without a gripper is ``--play`` on a file: it reads a
+    ``.lgt`` and drives the window from it.  The recording path and the hardware
+    replay are checked only as far as argument parsing and the refusal to start
+    — running either would move a real gripper, and the module that would do the
+    moving is covered with a stand-in in ``tests/test_example03_loop.py``.
+    """
 
-    def test_it_walks_through_all_three_demos(self, fast_grasp):
-        text = output_of(fast_grasp)
-        for marker in ("[1] 夹住一个 ", "[2] 往下拽，找摩擦力的极限",
-                       "[3] 松爪", "完成"):
-            assert marker in text, f"缺少 {marker} 段落"
+    def test_help_lists_the_trajectory_options(self):
+        stdout = run(EXAMPLE_03, "--help").stdout
+        for flag in ("--play", "--record", "--speed", "--real"):
+            assert flag in stdout, f"03 的选项里缺少 {flag}"
 
-    def test_it_reports_the_grip_and_the_slip(self, fast_grasp):
-        """The two pull tests are the point of the example."""
-        text = output_of(fast_grasp)
-        assert "没动" in text          # 5 N: held by friction
-        assert "滑了" in text          # 15 N: past the friction limit
+    def test_the_grasp_options_are_gone(self):
+        """The old demo's flags must not survive as silent no-ops."""
+        for flag, value in (("--object-mm", "60"), ("--force", "10"),
+                            ("--hold", "1"), ("--pull", "15"),
+                            ("--slip", "1")):
+            result = run(EXAMPLE_03, "--headless", flag, value)
+            assert result.returncode == 2, \
+                f"{flag} 还认得：{output_of(result)}"
 
-    def test_the_part_only_touches_the_fingers_while_held(self, fast_grasp):
-        assert "落在 link [0, 1]" in output_of(fast_grasp)
+    def test_record_and_play_are_refused_together(self):
+        """They are two different sessions; one run cannot be both."""
+        result = run(EXAMPLE_03, "--record", "1", "--play", "somewhere")
+        assert result.returncode == 2
+        assert "--play" in output_of(result)
 
-    def test_releasing_drops_the_part(self, fast_grasp):
-        assert "手指张开 → 方块下落" in output_of(fast_grasp)
+    def test_real_without_play_is_refused(self):
+        """``--real`` modifies a replay.  A recording is already on hardware, so
+        accepting the flag there would mean nothing and read as if it did."""
+        result = run(EXAMPLE_03, "--real")
+        assert result.returncode == 2
+        assert "--real" in output_of(result)
 
-    def test_it_says_it_does_not_touch_real_hardware(self, fast_grasp):
-        assert "不接真机" in output_of(fast_grasp)
+    def test_a_non_positive_speed_is_refused(self):
+        result = run(EXAMPLE_03, "--play", "somewhere", "--speed", "0")
+        assert result.returncode == 2
+        assert "--speed" in output_of(result)
 
-    def test_a_bigger_object_and_a_stronger_grip_still_work(self):
-        result = run(EXAMPLE_03, "--headless", "--object-mm", "60",
-                     "--force", "20", "--speed", "0.2", "--hold", "0.2")
+    @pytest.fixture
+    def bare_trajectory_sdk(self, tmp_path) -> dict:
+        """An importable ``litegrip`` package with none of the trajectory API."""
+        package = tmp_path / "litegrip"
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            "class LiteGrip:\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+        return {"LITEGRIP_TRAJ_SDK_DIR": str(tmp_path)}
+
+    def test_an_sdk_without_the_trajectory_api_names_what_is_missing(
+            self, bare_trajectory_sdk):
+        """The failure mode that has a physical cost: an SDK that imports but
+        cannot record or replay must stop the example, not half-run it."""
+        result = run(EXAMPLE_03, "--channel", NOWHERE, env=bare_trajectory_sdk)
+        assert result.returncode == 1, output_of(result)
+        text = output_of(result)
+        assert "缺少轨迹录制/回放的公开接口" in text
+        assert "LiteGrip.record_start" in text
+        assert "LiteGrip.play_start" in text
+        assert "Trajectory.load" in text
+        # ...and says which of the two checkouts has them
+        assert "LITEGRIP_TRAJ_SDK_DIR" in text
+        assert "litegrip-python" in text
+        assert NOWHERE not in text      # never reached the bus
+
+    def test_without_the_sdk_it_says_where_to_get_it(self, tmp_path):
+        """Pointing the variable at nothing leaves whatever is installed; CI has
+        nothing installed at all.  Both must stop with a usable message."""
+        result = run(EXAMPLE_03, "--channel", NOWHERE,
+                     env={"LITEGRIP_TRAJ_SDK_DIR": str(tmp_path / "nope")})
+        assert result.returncode == 1, output_of(result)
+        text = output_of(result)
+        if "找不到带轨迹" in text:
+            assert "LITEGRIP_TRAJ_SDK_DIR" in text
+            assert "litegrip-python" in text
+            assert "pip install -e" in text
+        else:
+            # An SDK is importable, but it is the one 04/05 use.
+            assert "缺少轨迹录制/回放的公开接口" in text
+        assert NOWHERE not in text
+
+    def test_play_runs_the_window_and_touches_no_can(self, trajectory_file):
+        """``--play FILE`` is the offline viewer, and the only runnable path."""
+        result = run(EXAMPLE_03, "--play", trajectory_file, "--headless")
         assert result.returncode == 0, output_of(result)
-        assert "60 mm" in output_of(result)
+        text = output_of(result)
+        assert "[5] 回放：只灌仿真" in text
+        assert "不连真机" in text
+        assert "放完了" in text
 
-    def test_a_bad_urdf_path_fails_loudly(self):
-        result = run(EXAMPLE_03, "--headless", "--urdf", "/nonexistent/g.urdf")
+    def test_play_reports_the_trajectory_it_read(self, trajectory_file):
+        text = output_of(run(EXAMPLE_03, "--play", trajectory_file, "--headless"))
+        assert f"{FIXTURE_SAMPLES} 个样本" in text
+        assert "开度 0.200 → 0.800" in text
+
+    def test_a_missing_trajectory_file_is_reported(self, trajectory_file):
+        """A bare name is looked up in the SDK's trajectory directory, so the
+        message has to say where that is -- it is not the working directory."""
+        result = run(EXAMPLE_03, "--play", "no_such_trajectory_here",
+                     "--headless")
+        assert result.returncode == 1, output_of(result)
+        text = output_of(result)
+        assert "找不到这段轨迹" in text
+        assert ".lgt" in text
+        assert "trajectories" in text
+
+    def test_play_real_says_the_fingers_will_move(self, trajectory_file):
+        """``--real`` turns the viewer into a motion command, and the banner has
+        to say so before anything is sent."""
+        result = run(EXAMPLE_03, "--play", trajectory_file, "--real",
+                     "--channel", NOWHERE, "--calib", "/nonexistent/c.json")
+        assert result.returncode == 1, output_of(result)
+        text = output_of(result)
+        assert "两个手指会真实运动" in text
+        assert NOWHERE not in text      # it stopped at the calibration, first
+
+    def test_a_bad_urdf_path_fails_loudly(self, trajectory_file):
+        result = run(EXAMPLE_03, "--play", trajectory_file, "--headless",
+                     "--urdf", "/nonexistent/g.urdf")
         assert result.returncode != 0
         assert "URDF" in output_of(result) or "urdf" in output_of(result)
 
@@ -363,7 +515,7 @@ class TestChoosingCalibrationIsMandatory:
         assert "--calib" in text
         assert "上位机" in text
 
-    def test_example_03_refuses_too(self):
+    def test_example_04_refuses_too(self):
         result = run(EXAMPLE_04, "--duration", "1")
         if "找不到真机 SDK" in output_of(result):
             pytest.skip("装真机 SDK 才能测到这一步（裸 SDK 会在选标定之前就停）")
@@ -404,7 +556,7 @@ class TestChoosingCalibrationIsMandatory:
 
 
 class TestExample04WithoutHardware:
-    """03 imports the SDK before it looks at the CAN interface.
+    """04 imports the SDK before it looks at the CAN interface.
 
     Without the SDK installed it stops earlier — with a different, equally valid
     message — so these two need it present to test what they claim to.
@@ -446,7 +598,7 @@ class TestExample04WithoutHardware:
         """Suppressing the sends must not short-circuit connecting or the error.
 
         Compared against the same run *without* ``--passive`` rather than against
-        a fixed string, because how far 03 gets depends on whether the SDK is
+        a fixed string, because how far 04 gets depends on whether the SDK is
         installed: with it the run reaches the CAN interface, without it it
         stops earlier. Both are correct; ``--passive`` must not alter either.
         """

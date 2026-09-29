@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""样例 03 · 轨迹录制与回放 — 手拖一遍，仿真和夹爪一起重现
+
+录的时候真机进**零重力**：两个手指的力被撤掉，可以用手推着走，SDK 在后台按 100 Hz
+采样，记下每一拍的开度。录完存成一段 ``.lgt``，回放时同一段轨迹**同时**喂给真机和
+PyBullet——真机的电机按轨迹走，窗口里的仿真跟着显示，所以「仿真里看到的」就是
+「夹爪正在做的」。
+
+录的是**归一化开度**（0 闭合 … 1 张开），不是角度：换一台夹爪、换一份标定，同一段
+轨迹照样能放，因为开度会按**本机**的标定换算成角度。
+
+前提:
+  1. 真机接在 CAN 总线上（默认 can0，用 --channel 换），录制时得能够到两个手指
+  2. 装了**带轨迹接口**的那份 litegrip SDK。注意它和 04/05 要的不是同一份检出：
+     轨迹接口（record_start / play_start / Trajectory）在 litegrip-python 那条线
+     上，refresh_status / data_age_s 那几个在 lite-grip 这条线上，而两份包的版本号
+     都是 2.2.0——看版本号分不出来：
+       pip install -e /path/to/litegrip-python
+     或 export LITEGRIP_TRAJ_SDK_DIR=/path/to/litegrip-python/src
+  3. 先选定这台夹爪的标定文件：录制要求 SDK 处于**已标定**状态（轨迹按行程归一，
+     没有标定就算不出开度），回放也要按本机行程把开度换算回角度。不给 --calib 就会
+     在终端里列出候选让你选，选不出来直接退出
+  4. 录制需要手指能被推动，所以录制期间**不要**让别的程序同时驱动这台夹爪
+
+两种用法:
+
+  * **录一段再放**（默认）：连接 → 进零重力 → 手拖 → 存盘 → 真机和仿真一起回放。
+  * **放一段已有的**（``--play``）：默认**只灌仿真**，不连真机、一帧都不发，用来
+    回看之前录的东西。要在真机上也放，加 ``--real``。
+
+注意：**使能态**的电机静默就锁进通信丢失故障（0xD）——红灯闪、位置照读、指令一律
+不执行。多久算静默，两个数不一致：本仓在这台机器上实测约 0.9 s，而 SDK 自己的文档
+写的是约 100 ms，取短的为准——本样例按 200 Hz 连续喂，两个数都够不着。录制结束时
+SDK 只补一帧 ``exit_zero_gravity()`` 就撒手，所以本样例在「录制结束 → 开始回放」这
+段空档里自己发「锁在实测位置」的保持帧，回放结束时也一样。发的不是运动指令：目标
+就是它当时的位置，零前馈。
+
+注意：回放结束后手指停在轨迹终点，**不会**自己回去。按 Esc / Q 退出时本样例会失能
+（0xFD），手指随之变松、可能因自重滑动。
+
+运行:
+  python3 examples/03_trajectory.py --record 6 --calib ~/.litegrip/litegrip_calibration.json
+  python3 examples/03_trajectory.py --calib ~/.litegrip/litegrip_calibration.json
+  python3 examples/03_trajectory.py --play 03_hand_taught-20260929-120000
+  python3 examples/03_trajectory.py --play 03_hand_taught-20260929-120000 --real
+  python3 examples/03_trajectory.py --play 03_hand_taught-20260929-120000 --speed 0.5 --headless
+"""
+import argparse
+import sys
+import time
+
+from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
+    SAFETY_BANNER,
+    add_common_args,
+    add_hardware_args,
+    calibration_summary,
+    check_calibration_matches_args,
+    check_trajectory_sdk_api,
+    choose_calibration_file,
+    import_trajectory_litegrip,
+    load_chosen_calibration,
+    rad_to_fraction,
+    read_calibration_file,
+    status_line,
+)
+
+from litegrip_pybullet import (
+    QUIT_KEYS,
+    GripperSim,
+    fraction_to_aperture_mm,
+    pressed,
+)
+
+#: 录制/回放的采样率 [Hz]（SDK 的默认值）。录得比手动拖动快得多，所以样本之间
+#: 线性插值不会漏掉手上的动作。
+RATE_HZ = 100.0
+
+#: 空档期保持帧的频率 [Hz]，和 04 里那个保活循环同一个理由、同一个数。
+FRAME_HZ = 200.0
+FRAME_DT = 1.0 / FRAME_HZ
+
+#: 实测的通信超时闩锁时间 [s]：使能态的电机静默这么久就报 0xD。
+#:
+#: 只用来把话说具体，逻辑上不依赖它——保持帧是按 200 Hz 发的，比它短一个数量级。
+#: 而且这个数本身只是本仓的实测：电机的 ``TIMEOUT`` 寄存器读到过 8000 ms、也读到过
+#: 0（SDK 自己标了「待查」），SDK 的轨迹模块又写「约 100 ms」。按最短的那个喂。
+MEASURED_COMM_LOSS_S = 0.9
+
+#: 终端读数的最小刷新间隔 [s]。
+PRINT_DT = 0.5
+
+#: 读一帧状态帧最多等多久 [s]（SDK 的 ``get_state(wait=True)`` 内部也是等 50 ms）。
+POLL_WAIT_S = 0.05
+
+#: 存盘用的名字前缀；真正的文件名还会带上录制时刻，免得覆盖上一次录的。
+DEFAULT_NAME = "03_hand_taught"
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description="样例 03 · 轨迹录制与回放：手拖一遍真机，仿真和夹爪一起重现",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_common_args(ap)
+    add_hardware_args(ap)
+    ap.add_argument("--record", type=float, default=0.0,
+                    help="录制多少秒后自动停（默认 0 = 一直录到 Esc/Q）")
+    ap.add_argument("--play", default=None,
+                    help="回放一段已有的轨迹（名字或路径，不带 .lgt 也行）。默认"
+                         "**只灌仿真**：不连真机、一帧都不发；要在真机上也放，"
+                         "加 --real")
+    ap.add_argument("--real", action="store_true",
+                    help="配合 --play：这段轨迹也下发给真机（两个手指会真实运动）")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="回放倍速（默认 1.0；0.5 = 半速，2 = 两倍速）")
+    args = ap.parse_args()
+    if args.play and args.record:
+        ap.error("--record 和 --play 不能同时给：--play 放的是已有的轨迹，"
+                 "不会现场录一段")
+    if args.real and not args.play:
+        ap.error("--real 只在 --play 时有意义：录制本来就是在真机上录的")
+    if args.speed <= 0:
+        ap.error(f"--speed 要大于 0（给的是 {args.speed:g}）")
+    return args
+
+
+def open_gripper(args, litegrip):
+    """连接真机：选标定 → connect → 载入并核实标定 → 使能。
+
+    这是 :func:`_common.open_real_gripper` 的同一条流程，只去掉了
+    ``check_sdk_api``：03 用的是带**轨迹**接口的那份 SDK，而那份清单查的是新鲜度
+    接口（``refresh_status`` / ``data_age_s``），轨迹那份没有也不该有。标定这一段
+    一个字都没省——轨迹按行程归一，标定错了，录下来和放出去的都是错的角。
+    """
+    calib_path = choose_calibration_file(args.calib)
+    calib = read_calibration_file(calib_path)
+    notes = check_calibration_matches_args(calib, channel=args.channel,
+                                           can_id=args.can_id,
+                                           mst_id=args.mst_id)
+    print(f"   [真机] 标定 {calib_path}")
+    print(f"          {calibration_summary(calib)}")
+    for note in notes:
+        print(note)
+    print(f"   [真机] 连接 {args.channel} · can_id={args.can_id:#04x} · "
+          f"mst_id={args.mst_id:#04x}")
+    gripper = litegrip.LiteGrip(channel=args.channel, can_id=args.can_id,
+                                mst_id=args.mst_id)
+    try:
+        if not gripper.connect():
+            raise SystemExit(
+                f"连不上 {args.channel}。检查：\n"
+                f"   1) 接口是否存在且已起来 —— "
+                f"sudo ip link set {args.channel} up type can bitrate 1000000\n"
+                f"   2) ip -details link show {args.channel}\n"
+                f"   3) 夹爪是否已上电、CAN_H/CAN_L 是否接对、"
+                f"终端电阻（120Ω）是否装了"
+            )
+        # 标定必须在 enable 之前载入：SDK 的毫米刻度依赖它，轨迹的归一化开度也是
+        load_chosen_calibration(gripper, calib_path, calib)
+        if not gripper.enable():
+            raise SystemExit("使能失败：夹爪可能处于错误状态或未上电")
+    except SystemExit:
+        gripper.disconnect()
+        raise
+    except Exception as exc:      # SDK 的各种 *Error
+        gripper.disconnect()
+        raise SystemExit(f"初始化真机失败：{exc}") from exc
+    cfg = gripper.config
+    print(f"   [真机] 已使能 · 行程 {cfg.pos_closed_rad - cfg.pos_open_rad:.4f} rad"
+          f"（{cfg.pos_closed_rad:+.4f} → {cfg.pos_open_rad:+.4f}）"
+          f" · kp={cfg.kp:g} kd={cfg.kd:g}")
+    return gripper
+
+
+def read_state(gripper, timeout_s=POLL_WAIT_S):
+    """读一帧状态；这一帧没等到就返回 ``None``。
+
+    只用 ``poll`` + ``get_state(wait=False)``，也就是轨迹那份 SDK 的公开接口
+    （``refresh_status`` 那种只读唤醒帧只在 04/05 用的那份里有）。等不到就返回
+    ``None``，调用方**不许**拿缓存里的数当位置——缓存里可能是 ``MotorState`` 的
+    初值 ``0.0``，那不是「夹爪在 0 弧度」，是「从没读到过」。
+    """
+    try:
+        if not gripper.poll(timeout_s=timeout_s):
+            return None
+        return gripper.get_state(wait=False)
+    except Exception:            # 传输层掉了等等：没有帧就是没有帧
+        return None
+
+
+def mirror(gripper, sim, state):
+    """把仿真手指瞬移到真机现在的位置，返回归一化开度（读不到就返回 ``None``）。
+
+    用 ``reset_fraction``（运动学瞬移）而不是 ``command_fraction``（跑动力学追过去）：
+    镜像要的是「真机现在在哪」，不是「仿真打算去哪」。读不到状态帧时**不动**画面，
+    让它停在最后一次读数上——照缓存的伪值渲染等于撒谎。
+    """
+    if state is None:
+        return None
+    fraction = rad_to_fraction(gripper, state.position_rad)
+    sim.reset_fraction(fraction)
+    return fraction
+
+
+class HoldKeeper:
+    """空档期给电机喂「锁在实测位置」的保持帧。
+
+    为什么必须有它：录制结束时 SDK 只补一帧 ``exit_zero_gravity()`` 就撒手，而
+    **使能态**的电机静默约 :data:`MEASURED_COMM_LOSS_S` 就锁进通信丢失故障（0xD：
+    红灯闪、位置照读、指令一律不执行）。存盘、打印摘要、准备回放这几步都落在这个
+    空档里，不喂帧的话，等回放开始时电机已经哑了。回放结束之后同理。
+
+    目标只在一个**相位边界**上重新定（``hold_at``），不在每拍读一次——每拍拿当次
+    读数现造目标的话，一次读数冻结就会变成一条指向伪值的新指令，那是阶跃。没读到
+    过位置就**不发**：拿缓存里的 0.0 当目标是发一条指向别处的指令，比少发一帧危险
+    得多。
+    """
+
+    def __init__(self, gripper):
+        self._gripper = gripper
+        self._last = 0.0
+        self.target_rad = None
+        self.frames = 0
+
+    def hold_at(self, state):
+        """把目标重新定到这次实测的位置上；读不到就不动（返回 ``False``）。"""
+        if state is None:
+            return False
+        self.target_rad = float(state.position_rad)
+        return True
+
+    def tick(self, now):
+        """到点了就发一帧保持帧；返回这一拍发没发。"""
+        if self.target_rad is None or now - self._last < FRAME_DT:
+            return False
+        self._last = now
+        cfg = self._gripper.config
+        self._gripper.send_mit_frame(q=self.target_rad, kp=cfg.kp, kd=cfg.kd)
+        self.frames += 1
+        return True
+
+
+def feed(keeper):
+    """喂一帧保持帧（没有 keeper、或还没读到过位置就什么都不做）。
+
+    **只在没有录制/回放会话的时候调用**：那两种会话跑起来时 CAN 的收发归 SDK 的
+    后台线程，本样例再往总线上插一脚就是两条流抢同一根总线——回放的轨迹会被打散。
+    会话之间的空档才轮到它，见 :data:`MEASURED_COMM_LOSS_S`。
+    """
+    if keeper is not None:
+        keeper.tick(time.monotonic())
+
+
+def record_phase(gripper, sim, args):
+    """``[3]`` 录制：进零重力、手拖、Esc/Q（或 ``--record N`` 秒）结束。
+
+    Returns:
+        录到的轨迹；SDK 说这次录制是空的（一个样本都没有）时返回 ``None``。
+    """
+    print("\n[3] 录制：手拖一遍")
+    print("   [真机] 进零重力——两个手指的力被撤掉，可以直接用手推动")
+    print(f"   [真机] SDK 在后台按 {RATE_HZ:g} Hz 采样"
+          + (f"；{args.record:g} s 后自动停" if args.record > 0 else
+             "；按 Esc / Q 结束录制"))
+    # zero_gravity=True 时**录制器自己**在流零力矩帧，本样例这一路一个运动指令都
+    # 不能发（SDK 原话：Do not drive the gripper from the caller while that runs）。
+    gripper.record_start(rate_hz=RATE_HZ, zero_gravity=True)
+    started = time.monotonic()
+    last_print = 0.0
+    while sim.connected():
+        if pressed(sim.keyboard_events(), QUIT_KEYS):
+            print("\n   收到退出键")
+            break
+        now = time.monotonic()
+        if args.record > 0 and now - started >= args.record:
+            print(f"\n   录满 {args.record:g} s")
+            break
+        state = read_state(gripper)
+        fraction = mirror(gripper, sim, state)
+        samples = int(gripper.trajectory_status().get("samples") or 0)
+        sim.status_text(
+            f"录制中 · 已采 {samples} 个样本   "
+            + ("未读到状态帧（窗口停在最后读数）" if fraction is None else
+               f"开度 {fraction * 100:5.1f}%   "
+               f"开口 {fraction_to_aperture_mm(fraction):5.2f} mm")
+        )
+        if now - last_print >= PRINT_DT:
+            last_print = now
+            if fraction is None:
+                print("  [真机] 读不到状态帧：窗口停在最后一次读数上。"
+                      "录制还在继续——它在 SDK 的后台线程里。")
+            else:
+                print("  " + status_line(
+                    "真机", fraction=fraction,
+                    aperture_mm=fraction_to_aperture_mm(fraction),
+                    force_n=state.force_n, moving=bool(state.is_moving),
+                ) + f" · 已采 {samples} 个样本")
+        if not sim.step():
+            break
+
+    # record_stop() 内部会补一帧 exit_zero_gravity() 把电机恢复成正常闭环，然后就
+    # 没人喂帧了——所以它一返回，调用方就得马上把保持帧接上（见 main 里的 feed 和
+    # HoldKeeper：这是那个 0.9 s 预算里唯一要防的空档）。
+    try:
+        trajectory = gripper.record_stop()
+    except Exception as exc:     # TrajectoryEmptyError / TrajectoryRecordingError
+        print(f"\n   这次没录到东西：{exc}")
+        return None
+    print(f"\n   录到 {len(trajectory)} 个样本 · {trajectory.duration:.2f} s")
+    return trajectory
+
+
+def save_phase(trajectory):
+    """``[4]`` 存盘：写进 SDK 的轨迹目录（``~/.litegrip/trajectories``）。
+
+    文件名带上录制时刻，免得覆盖上一次录的；也**不写进本仓库**——``.lgt`` 是从这台
+    机器上量出来的数据，不是源码。
+
+    Returns:
+        存下来的名字（不带目录），下次 ``--play`` 就用它。
+    """
+    name = f"{DEFAULT_NAME}-{time.strftime('%Y%m%d-%H%M%S')}"
+    path = trajectory.save(name)
+    print(f"\n[4] 保存轨迹\n   {path}")
+    print(f"   下次回放：--play {name}")
+    return name
+
+
+def load_trajectory(litegrip, name):
+    """读一段轨迹（纯文件 I/O，不碰 CAN）；读不出来就带着原因退出。"""
+    try:
+        return litegrip.Trajectory.load(name)
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"找不到这段轨迹：{name}\n"
+            f"   不带目录的名字会在 {litegrip.trajectory_dir()} 下找，"
+            "并自动补 .lgt 后缀。\n"
+            "   （原始错误：%s）" % exc
+        ) from exc
+    except Exception as exc:     # TrajectoryFormatError 等
+        raise SystemExit(f"这段轨迹读不出来：{name}\n   （{exc}）") from exc
+
+
+def describe(trajectory, source):
+    """一行说明这段轨迹是什么、有多长。"""
+    print(f"   {source} · {len(trajectory)} 个样本 · {trajectory.duration:.2f} s"
+          + (f" · 开度 {trajectory.samples[0].openness:.3f} → "
+             f"{trajectory.samples[-1].openness:.3f}" if len(trajectory) else ""))
+    print(f"   记录时的夹爪：can_id={trajectory.can_id:#04x}"
+          + (f" · mount={trajectory.mount}" if trajectory.mount else "")
+          + "（回放按**本机**标定换算，不用它）")
+
+
+def play_online(gripper, sim, trajectory, args, keeper):
+    """``[5]`` 回放：同一段轨迹同时喂真机和仿真。
+
+    用 ``play_start``（后台线程）而不是 ``play``（阻塞到放完）：阻塞版把主线程占满，
+    仿真窗口就没人刷了，看不到「同时回放」。主循环因此只做两件事——读真机位置镜像
+    到仿真、看回放放完没有；回放期间**不发**自己的保持帧，总线归回放线程。
+    """
+    print("\n[5] 回放：仿真与夹爪同时")
+    print(f"   [真机] 先对齐到第一个样本（一次 goto_rad），再按 {args.speed:g} 倍速"
+          "回放")
+    gripper.play_start(trajectory, speed=args.speed, align=True)
+    last_print = 0.0
+    try:
+        while sim.connected():
+            if pressed(sim.keyboard_events(), QUIT_KEYS):
+                print("\n   收到退出键")
+                break
+            now = time.monotonic()
+            state = read_state(gripper)
+            fraction = mirror(gripper, sim, state)
+            status = gripper.trajectory_status()
+            done = not status.get("active")
+            sim.status_text(
+                f"回放中 · {status.get('frames', 0)} 帧 · "
+                f"{status.get('loop_hz', 0):.0f} Hz   "
+                + ("未读到状态帧（窗口停在最后读数）" if fraction is None else
+                   f"开度 {fraction * 100:5.1f}%   "
+                   f"开口 {fraction_to_aperture_mm(fraction):5.2f} mm")
+            )
+            if now - last_print >= PRINT_DT:
+                last_print = now
+                if fraction is None:
+                    print("  [真机] 读不到状态帧：窗口停在最后一次读数上。"
+                          "回放还在继续——它在 SDK 的后台线程里。")
+                else:
+                    print("  " + status_line(
+                        "真机", fraction=fraction,
+                        aperture_mm=fraction_to_aperture_mm(fraction),
+                        force_n=state.force_n, moving=bool(state.is_moving),
+                    ) + f" · {status.get('frames', 0)} 帧")
+            if done:
+                print(f"\n   放完了（{status.get('frames', 0)} 帧 · 实测循环 "
+                      f"{status.get('loop_hz', 0):.1f} Hz）")
+                break
+            if not sim.step():
+                break
+    finally:
+        # play_stop() 会把夹爪留在最后一个目标位上——那一帧之后又没人喂了，所以
+        # 紧接着就得把保持帧接上，而且目标要重新取**现在**的位置（还用回放开始前
+        # 那个目标的话，本样例就是在下一条没人要求的运动指令：把手指从轨迹终点
+        # 拽回起点）。
+        gripper.play_stop()
+        keeper.hold_at(read_state(gripper))
+        feed(keeper)
+    if keeper.target_rad is not None:
+        print(f"   [真机] 锁在当前位置 {keeper.target_rad:+.4f} rad"
+              "（零前馈，不命令运动；手指不会自己回起点）")
+
+
+def play_offline(sim, trajectory, args):
+    """``[5]`` 回放：只灌仿真（``--play`` 的默认路径）。
+
+    不连真机、不发送任何帧，所以这条路随时可跑：一段 ``.lgt`` 加上本地时钟就够了，
+    开度直接问 ``Trajectory.openness_at(t)``（样本之间线性插值，两端夹住）。
+    """
+    print("\n[5] 回放：只灌仿真")
+    print("   （--play 默认不碰真机：不连、不使能、一帧都不发。"
+          "要在真机上也放，加 --real）")
+    duration = trajectory.duration / args.speed
+    started = time.monotonic()
+    last_print = 0.0
+    while sim.connected():
+        if pressed(sim.keyboard_events(), QUIT_KEYS):
+            print("\n   收到退出键")
+            break
+        now = time.monotonic()
+        t = min((now - started) * args.speed, trajectory.duration)
+        fraction = trajectory.openness_at(t)
+        sim.reset_fraction(fraction)
+        sim.status_text(
+            f"回放中 · {t:5.2f} / {trajectory.duration:.2f} s   "
+            f"开度 {fraction * 100:5.1f}%   "
+            f"开口 {fraction_to_aperture_mm(fraction):5.2f} mm"
+        )
+        if now - last_print >= PRINT_DT:
+            last_print = now
+            print("  " + status_line(
+                "仿真", fraction=fraction,
+                aperture_mm=fraction_to_aperture_mm(fraction),
+            ) + f" · {t:5.2f} / {trajectory.duration:.2f} s")
+        if now - started >= duration:
+            break
+        if not sim.step():
+            break
+    print(f"\n   放完了（{duration:.2f} s，{args.speed:g} 倍速）")
+
+
+def main():
+    args = parse_args()
+
+    print("样例 03 · 轨迹录制与回放")
+    if args.play:
+        print(f"   --play {args.play}：只灌仿真"
+              + ("，另外下发给真机（两个手指会真实运动）" if args.real else
+                 "，不连真机"))
+    else:
+        print(SAFETY_BANNER)
+    # 03 要的是带**轨迹**接口的那份 SDK，和 04/05 用的那份不是同一个检出
+    # （两份的 __version__ 都是 2.2.0，只能按能力分辨）。缺接口就在这里停。
+    litegrip = import_trajectory_litegrip()
+    check_trajectory_sdk_api(litegrip)
+
+    print("\n[1] 载入仿真模型")
+    sim = GripperSim(urdf_path=args.urdf, gui=not args.headless, gravity=(0, 0, 0))
+    sim.focus_camera()
+    print(f"   {sim.urdf_path}")
+
+    need_hardware = (not args.play) or args.real
+    gripper = None
+    keeper = None
+    saved = None
+    trajectory = None
+    try:
+        print("\n[2] 连接真机")
+        if need_hardware:
+            gripper = open_gripper(args, litegrip)
+            keeper = HoldKeeper(gripper)
+            # 使能之后就得有人喂帧：先读一帧实测位置把保持帧的目标定下来，读不到
+            # 就干脆不发（见 HoldKeeper）。
+            keeper.hold_at(read_state(gripper))
+            feed(keeper)
+        else:
+            print("   跳过：--play 默认不碰真机（要真机也一起放就加 --real）")
+
+        if args.play:
+            print("\n[3] 录制")
+            print("   跳过：--play 放的是已有的轨迹")
+            print("\n[4] 读取轨迹")
+            trajectory = load_trajectory(litegrip, args.play)
+            describe(trajectory, args.play)
+            if not len(trajectory):
+                print("   这段轨迹一个样本都没有，没有东西可放（录制那次是空的？）")
+                return 1
+        else:
+            trajectory = record_phase(gripper, sim, args)
+            if trajectory is None:
+                return 1
+            # record_stop() 之后到 play_start() 之前是这次运行里唯一的空档：中间
+            # 只做「读一帧位置 → 写文件 → 打印」，几十毫秒，远在 0.9 s 的预算之内。
+            # 两头顶上保持帧，是让它不依赖「这几步一定不慢」这个假设。
+            keeper.hold_at(read_state(gripper))
+            feed(keeper)
+            saved = save_phase(trajectory)
+
+        if gripper is None:
+            play_offline(sim, trajectory, args)
+        else:
+            feed(keeper)
+            play_online(gripper, sim, trajectory, args, keeper)
+
+        if keeper is not None:
+            print(f"   空档期发了 {keeper.frames} 帧保持帧"
+                  "（使能态静默就锁 0xD：本仓实测约 "
+                  f"{MEASURED_COMM_LOSS_S:g} s，SDK 文档写约 0.1 s）")
+            print("   按 Esc / Q 退出（退出会失能：手指变松、可能因自重滑动）")
+            while sim.connected():
+                if pressed(sim.keyboard_events(), QUIT_KEYS):
+                    print("\n   收到退出键")
+                    break
+                feed(keeper)
+                if not sim.step():
+                    break
+    except KeyboardInterrupt:
+        print("\n用户中断")
+    finally:
+        if gripper is not None:
+            # 退出前**失能**（0xFD），而不是最后补一帧就不管：使能态的电机静默约
+            # 0.9 s 就锁 0xD，失能则不需要任何帧。
+            gripper.disable()
+            gripper.disconnect()
+            print("\n[真机] 已失能并关闭（手指变松、可能因自重滑动）")
+        elif need_hardware:
+            print("\n[真机] 未连接")
+        sim.disconnect()
+        print("[仿真] 已关闭")
+
+    if trajectory is None:       # 中途 Ctrl-C，还没读到/录到轨迹
+        print("完成（没有轨迹）。反向的（仿真控真机）见 "
+              "examples/05_dual_control.py")
+        return 1
+    print(f"完成（{len(trajectory)} 个样本 · {trajectory.duration:.2f} s"
+          + (f" · 存为 {saved}" if saved else "") + "）。"
+          "反向的（仿真控真机）见 examples/05_dual_control.py")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

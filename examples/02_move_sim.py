@@ -3,7 +3,7 @@
 """样例 02 · 仿真运动 — 速度受限的全行程开合，以及按归一化开度定位
 
 不用真机、不碰 CAN：命令 → 手指按额定速度走 → settle() 等它到位，全在 PyBullet 里。
-想看夹爪怎么夹住东西，继续看 examples/03_grasp.py。
+想让夹爪自己走一段你自己拖出来的动作，继续看 examples/03_trajectory.py。
 
 演示:
   sim.command_fraction(fraction, force_n=, velocity_m_s=)  命令一个开度
@@ -131,7 +131,7 @@ def main() -> int:
         interactive(sim)
     finally:
         sim.disconnect()
-    print("\n完成。想夹住东西，继续看 examples/03_grasp.py"
+    print("\n完成。想把一段手拖的动作录下来重放，继续看 examples/03_trajectory.py"
           "；真机版本见 examples/05_dual_control.py")
     return 0
 
