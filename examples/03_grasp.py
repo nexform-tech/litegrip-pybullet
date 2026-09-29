@@ -126,7 +126,7 @@ def demo_grasp(sim: GripperSim, args: argparse.Namespace) -> int:
           f"接触点 {len(points)} 个，落在 link {touched}"
           f"（都是手指，没有底座）")
     if not points:
-        print("   ⚠️ 没有接触点：方块可能没夹住，试试调大 --object-mm 或 --force")
+        print("   没有接触点：方块可能没夹住，试试调大 --object-mm 或 --force")
     return box
 
 

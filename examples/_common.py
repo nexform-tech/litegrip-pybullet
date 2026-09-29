@@ -16,12 +16,12 @@
   fresh_state()      等到一帧**新**的状态帧再读位置；等不到返回 None
                      （读真机位置只该走这里，别直接读 get_state() 的缓存）
 
-⚠️ 04/05 会驱动真机！真机的两个手指会真的闭合。首次跑请：
+04/05 会驱动真机！真机的两个手指会真的闭合。首次跑请：
   1) 把夹爪拿在手上或固定在台面上，**手指行程内不要放任何东西**；
   2) 手放在电源开关旁边；
   3) 先用 --dry-run（05）跑一遍看看流程。
 
-⚠️ 每次跑都要**先选定这台夹爪的标定文件**（见 :func:`choose_calibration_file`）：
+每次跑都要**先选定这台夹爪的标定文件**（见 :func:`choose_calibration_file`）：
 标定的角度/毫米刻度是从这台机器上量出来的，用别人（或出厂）的那份算目标角，
 轻则夹不住、重则一条指令直接撞限位。标定文件由上位机标定后保存得到
 （``litegrip-studio`` / ``litegrip-console``，或 SDK 自带的
@@ -78,7 +78,7 @@ __all__ = [
 
 #: 真机样例开跑前打印的横幅。
 SAFETY_BANNER = """\
-⚠️  即将驱动真机：夹爪两个手指会真实运动。
+即将驱动真机：夹爪两个手指会真实运动。
     请确认行程内无遮挡、人员远离，并让电源开关触手可及。
     再确认一次：下面打印的那份标定文件，是**这台夹爪**标出来的。
     随时按 Esc / Q 停止（会等当前这条指令走完再退出）。"""
@@ -148,7 +148,7 @@ def import_litegrip():
         import litegrip
     except ImportError as exc:
         raise SystemExit(
-            "❌ 找不到真机 SDK（litegrip 包）。\n"
+            "找不到真机 SDK（litegrip 包）。\n"
             "   litegrip **没有发布到 PyPI**，`pip install litegrip` 装的不是它；\n"
             "   本仓库要的是带 refresh_status() / GripperState.data_age_s 这些公开\n"
             "   接口的检出。三种任选其一：\n"
@@ -199,7 +199,7 @@ def check_sdk_api(litegrip) -> None:
     why = dict(REQUIRED_SDK_API)
     directory = sdk_dir()
     raise SystemExit(
-        "❌ 这份 litegrip SDK 缺少本仓库必须的公开接口：\n"
+        "这份 litegrip SDK 缺少本仓库必须的公开接口：\n"
         + "".join(f"     • {path} —— {why[path]}\n" for path in missing)
         + "   litegrip **没有发布到 PyPI**（`pip install litegrip` 装到的不是这份"
           "代码），\n"
@@ -275,7 +275,7 @@ _CALIB_FIELDS: tuple[tuple[str, str], ...] = (
 #: （它是「名义行程」而不是量出来的尺寸），所以只读文件、拿不到 config 的
 #: ``--dry-run`` 用这个值做自洽性检查。
 #:
-#: ⚠️ 开度换算**不**用它。归一化开度按标定行程归一，见 :func:`rad_to_fraction`：
+#: 开度换算**不**用它。归一化开度按标定行程归一，见 :func:`rad_to_fraction`：
 #: 这个名义值和标定文件里 ``rad_to_mm`` 那套刻度是可以对不上的。
 NOMINAL_STROKE_MM = 120.0
 
@@ -385,7 +385,7 @@ def read_calibration_file(path) -> dict:
     path = Path(path).expanduser()
     if str(path).endswith(SIM_CALIBRATION_MARKER):
         raise SystemExit(
-            f"❌ 这是一份**仿真**标定：{path}\n"
+            f"这是一份**仿真**标定：{path}\n"
             f"   上位机给仿真后端单独存一份（名字以 {SIM_CALIBRATION_MARKER} 结尾），"
             "里面的刻度是仿真里的，\n"
             "   不是这台真机量出来的。拿它算真机的目标角，轻则夹不住、重则撞限位。\n"
@@ -394,7 +394,7 @@ def read_calibration_file(path) -> dict:
         )
     if not path.is_file():
         raise SystemExit(
-            f"❌ 标定文件不存在：{path}\n"
+            f"标定文件不存在：{path}\n"
             "   （SDK 在这种情况会**静默改用出厂标定**，所以这里宁可停下。）\n"
             "   标定文件由上位机标定后保存：litegrip-studio / litegrip-console，\n"
             "   或 SDK 自带的 tools/gui/litegrip_gui.py。"
@@ -402,13 +402,13 @@ def read_calibration_file(path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"❌ 标定文件读不出来：{path}\n   （{exc}）") from exc
+        raise SystemExit(f"标定文件读不出来：{path}\n   （{exc}）") from exc
     if not isinstance(data, dict):
-        raise SystemExit(f"❌ 标定文件不是一份 JSON 对象：{path}")
+        raise SystemExit(f"标定文件不是一份 JSON 对象：{path}")
     missing = [key for key in REQUIRED_CALIB_KEYS if key not in data]
     if missing:
         raise SystemExit(
-            f"❌ 标定文件缺字段：{path}\n"
+            f"标定文件缺字段：{path}\n"
             f"   缺 {'、'.join(missing)}（SDK 载入时直接取这几个键，缺了会抛 "
             "KeyError）。\n"
             "   看起来不是上位机保存的标定文件；重新标定并另存一份。"
@@ -449,7 +449,7 @@ def choose_calibration_file(requested=None, *, candidates=None,
     listing = "".join(f"     {i}) {p}\n" for i, p in enumerate(found, 1))
     if not found:
         raise SystemExit(
-            f"❌ 没有指定标定文件，也没有找到候选（{CALIBRATIONS_DIR} 下没有 "
+            f"没有指定标定文件，也没有找到候选（{CALIBRATIONS_DIR} 下没有 "
             "*.json）。\n"
             "   本样例**不接受** SDK 的默认标定/出厂标定：标定是每台夹爪单独量"
             "的，\n"
@@ -462,7 +462,7 @@ def choose_calibration_file(requested=None, *, candidates=None,
         )
     if not sys.stdin.isatty():
         raise SystemExit(
-            "❌ 需要先选定标定文件，但当前不是交互终端（stdin 不是 tty），"
+            "需要先选定标定文件，但当前不是交互终端（stdin 不是 tty），"
             "没法让你选。\n"
             "   本样例**不接受** SDK 的默认标定/出厂标定。\n"
             "   脚本/非交互请显式指定：--calib <路径>\n"
@@ -485,7 +485,7 @@ def choose_calibration_file(requested=None, *, candidates=None,
         try:
             summary = calibration_summary(read_calibration_file(path))
         except SystemExit:
-            summary = "⚠️ 读不出（不是可用的标定文件）"
+            summary = "读不出（不是可用的标定文件）"
         out(f"    {i}) {path}   {stamp}")
         out(f"       {summary}")
 
@@ -495,13 +495,13 @@ def choose_calibration_file(requested=None, *, candidates=None,
                          "回车/q 退出）: ").strip()
         except (EOFError, KeyboardInterrupt):
             raise SystemExit(
-                "❌ 没选标定文件就退出了——不会替你挑一份（默认标定/出厂标定都"
+                "没选标定文件就退出了——不会替你挑一份（默认标定/出厂标定都"
                 "不接受）。\n"
                 "   下次直接指路径：--calib <路径>"
             )
         if not answer or answer.lower() in ("q", "quit", "exit"):
             raise SystemExit(
-                "❌ 没有选定标定文件——不会替你挑一份（默认标定/出厂标定都不"
+                "没有选定标定文件——不会替你挑一份（默认标定/出厂标定都不"
                 "接受）。\n"
                 "   下一步：在上位机里对这台夹爪标定并保存，再重跑；"
                 "或 --calib <路径>。"
@@ -552,7 +552,7 @@ def check_calibration_matches_args(data: dict, *, channel=None, can_id=None,
                          f"{int(given):#04x}")
     if wrong:
         raise SystemExit(
-            "❌ 选中的标定文件不是这台夹爪的：\n"
+            "选中的标定文件不是这台夹爪的：\n"
             + "\n".join(wrong) + "\n"
             "   要么文件拿错了（另一台机器的标定），要么 ID 参数变了。\n"
             "   确认是同一台夹爪的话，在上位机里重新标定并保存一份，"
@@ -580,7 +580,7 @@ def load_chosen_calibration(gripper, path, data: dict | None = None) -> dict:
     """
     data = read_calibration_file(path) if data is None else data
     if not gripper.load_calibration(str(path)):
-        raise SystemExit(f"❌ SDK 载入标定失败：{path}")
+        raise SystemExit(f"SDK 载入标定失败：{path}")
     cfg = gripper.config
     applied = [(key, data[key], getattr(cfg, attr))
                for key, attr in _CALIB_FIELDS if key in data]
@@ -590,7 +590,7 @@ def load_chosen_calibration(gripper, path, data: dict | None = None) -> dict:
         detail = "\n".join(f"   {key}: 文件里是 {want!r}，实际用的是 {got!r}"
                            for key, want, got in differing)
         raise SystemExit(
-            f"❌ SDK 没有用这份文件，而是用了别的标定：{path}\n"
+            f"SDK 没有用这份文件，而是用了别的标定：{path}\n"
             f"{detail}\n"
             "   （``load_calibration`` 在文件读不出来时会静默回退到打包的出厂"
             "标定，\n"
@@ -652,7 +652,7 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
     try:
         if not gripper.connect():
             raise SystemExit(
-                f"❌ 连不上 {args.channel}。检查：\n"
+                f"连不上 {args.channel}。检查：\n"
                 f"   1) 接口是否存在且已起来 —— "
                 f"sudo ip link set {args.channel} up type can bitrate 1000000\n"
                 f"   2) ip -details link show {args.channel}\n"
@@ -668,13 +668,13 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
             print("[真机] 已连接、已载入并核实标定（未使能，不发送任何运动指令）")
             return gripper
         if not gripper.enable():
-            raise SystemExit("❌ 使能失败：夹爪可能处于错误状态或未上电")
+            raise SystemExit("使能失败：夹爪可能处于错误状态或未上电")
     except SystemExit:
         gripper.disconnect()
         raise
     except Exception as exc:  # SDK 的各种 *Error
         gripper.disconnect()
-        raise SystemExit(f"❌ 初始化真机失败：{exc}") from exc
+        raise SystemExit(f"初始化真机失败：{exc}") from exc
 
     cfg = gripper.config
     # kp/kd 一起打出来：它们是标定文件里的值（也是保持帧的刚度），改了标定之后
@@ -699,7 +699,7 @@ def fraction_to_target_rad(gripper, fraction: float) -> float:
 
         position_rad = pos_closed_rad − fraction × (pos_closed_rad − pos_open_rad)
 
-    ⚠️ 这里**不经过毫米**，也不碰 ``cfg.max_stroke_mm``。这正是它与
+    这里**不经过毫米**，也不碰 ``cfg.max_stroke_mm``。这正是它与
     ``goto(position_mm)`` 的唯一区别，理由见 :func:`rad_to_fraction`：
     ``position_mm`` 那把尺子是按**标定时那个** ``max_stroke_mm`` 定的，而
     ``load_calibration()`` 从不写这个字段，它一直是 SDK 的默认值——两者对不上
@@ -731,7 +731,7 @@ def check_calibration_values(pos_closed_rad: float, pos_open_rad: float,
     travel = pos_closed_rad - pos_open_rad
     if travel <= 0.0 or rad_to_mm <= 0.0 or max_stroke_mm <= 0.0:
         raise SystemExit(
-            "❌ 夹爪的标定值不合法，先做标定再跑：\n"
+            "夹爪的标定值不合法，先做标定再跑：\n"
             f"   pos_closed_rad={pos_closed_rad:+.4f} "
             f"pos_open_rad={pos_open_rad:+.4f} "
             f"rad_to_mm={rad_to_mm:.2f} max_stroke_mm={max_stroke_mm:.1f}\n"
@@ -754,7 +754,7 @@ def rad_to_fraction(gripper, position_rad: float) -> float:
     按**标定行程**归一，不按毫米——理由在下面，值得读完再改成「除以
     ``max_stroke_mm``」的写法。
 
-    ⚠️ 为什么不走毫米。SDK 的毫米刻度由 ``rad_to_mm`` 定，而 ``rad_to_mm`` 是
+    为什么不走毫米。SDK 的毫米刻度由 ``rad_to_mm`` 定，而 ``rad_to_mm`` 是
     标定那一刻用**当时那个** ``max_stroke_mm`` 算出来的（``gripper.calibrate()``
     里就是 ``max_stroke_mm / travel``）。可是 ``load_calibration()`` 从不写
     ``config.max_stroke_mm``，它一直是 ``GripperConfig`` 的默认值 120.0。两者只要
