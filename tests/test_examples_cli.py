@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""The three examples as programs: argument parsing, exit codes, startup paths.
+"""The five examples as programs: argument parsing, exit codes, startup paths.
 
 Nothing here touches can0.  The only real-hardware paths exercised are the ones
 that are *supposed* to fail — a CAN interface that does not exist — so the
 suite is safe to run on a machine with a gripper attached.
 """
 
+import ast
 import json
 import os
 import subprocess
@@ -18,11 +19,13 @@ pytest.importorskip("pybullet")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = REPO_ROOT / "examples"
-EXAMPLE_01 = EXAMPLES / "01_sim_only.py"
-EXAMPLE_05 = EXAMPLES / "05_dual_control.py"
-EXAMPLE_04 = EXAMPLES / "04_mirror_real.py"
+EXAMPLE_01 = EXAMPLES / "01_hello_sim.py"      # read the state, no motion
+EXAMPLE_02 = EXAMPLES / "02_move_sim.py"       # speed-limited travel, positioning
+EXAMPLE_03 = EXAMPLES / "03_grasp.py"          # grasp, friction limit, release
+EXAMPLE_04 = EXAMPLES / "04_mirror_real.py"    # hardware → simulation
+EXAMPLE_05 = EXAMPLES / "05_dual_control.py"   # simulation → hardware
 
-ALL_EXAMPLES = [EXAMPLE_01, EXAMPLE_04, EXAMPLE_05]
+ALL_EXAMPLES = [EXAMPLE_01, EXAMPLE_02, EXAMPLE_03, EXAMPLE_04, EXAMPLE_05]
 
 #: Long enough for a headless run, short enough to fail fast if it hangs.
 TIMEOUT_S = 180.0
@@ -80,20 +83,35 @@ def output_of(result: subprocess.CompletedProcess) -> str:
     return result.stdout + result.stderr
 
 
-#: The flags that make 01's headless run quick (~4 s instead of ~10 s) without
-#: changing what it demonstrates: the speed limit is what the demo is about, so
-#: raising it is fair game, and the hold time is only for watching.
-FAST = ("--headless", "--speed", "0.2", "--hold", "0.2")
+#: The flags that make the simulated runs quick (~4 s instead of ~10 s) without
+#: changing what they demonstrate: the speed limit is what the demo is about, so
+#: raising it is fair game, and the hold time is only for watching.  01 takes no
+#: options beyond the ones every example shares, and --hold belongs to 03 alone.
+FAST_HELLO = ("--headless",)
+FAST_MOVE = ("--headless", "--speed", "0.2")
+FAST_GRASP = ("--headless", "--speed", "0.2", "--hold", "0.2")
 
 
 @pytest.fixture(scope="module")
-def fast_01() -> subprocess.CompletedProcess:
+def fast_hello() -> subprocess.CompletedProcess:
     """One 01 run, shared by every test that just reads its output.
 
     Spawning a PyBullet process per assertion would triple this suite's runtime
     for no extra coverage.
     """
-    return run(EXAMPLE_01, *FAST)
+    return run(EXAMPLE_01, *FAST_HELLO)
+
+
+@pytest.fixture(scope="module")
+def fast_move() -> subprocess.CompletedProcess:
+    """One 02 run, shared the same way."""
+    return run(EXAMPLE_02, *FAST_MOVE)
+
+
+@pytest.fixture(scope="module")
+def fast_grasp() -> subprocess.CompletedProcess:
+    """One 03 run, shared the same way."""
+    return run(EXAMPLE_03, *FAST_GRASP)
 
 
 @pytest.mark.parametrize("script", ALL_EXAMPLES, ids=lambda p: p.name)
@@ -120,46 +138,138 @@ class TestHardwareFlags:
         assert "--mst-id" in result.stdout
 
 
-class TestExample01SimOnly:
-    """01 is the one example that must run anywhere, with no hardware at all."""
+class TestExample01HelloSim:
+    """01 creates the simulation and *reads* it: no hardware, no motion.
 
-    def test_headless_run_succeeds(self, fast_01):
-        assert fast_01.returncode == 0, output_of(fast_01)
+    It is the example that must run anywhere, and the only one whose point is
+    that nothing happens.
+    """
 
-    def test_it_walks_through_all_four_demos(self, fast_01):
-        text = output_of(fast_01)
-        for marker in ("1/4", "2/4", "3/4", "4/4", "收尾", "完成"):
+    #: Everything in ``GripperSim`` that moves the fingers, or puts a body in
+    #: the scene for them to move against.  01 must not call any of them.
+    MOTION_CALLS = ("command_fraction", "command_joint", "reset_fraction",
+                    "settle", "run_for", "add_box")
+
+    def test_headless_run_succeeds(self, fast_hello):
+        assert fast_hello.returncode == 0, output_of(fast_hello)
+
+    def test_it_reads_the_state_and_stops(self, fast_hello):
+        text = output_of(fast_hello)
+        for marker in ("[1] 模型常量", "[2] 当前开度（三种写法）", "完成"):
             assert marker in text, f"缺少 {marker} 段落"
 
-    def test_it_reports_the_grip_and_the_slip(self, fast_01):
+    def test_it_shows_the_opening_in_all_three_notations(self, fast_hello):
+        """The whole reason the file exists: 0..1, joint metres, and the SDK's
+        millimetres are three views of one opening, not three quantities."""
+        text = output_of(fast_hello)
+        assert "100.0%" in text        # fraction(), fully open out of the box
+        assert "87.00 mm" in text      # aperture_mm(), the physical gap
+        assert "120.00 mm" in text     # fraction_to_sdk_mm(), the SDK's scale
+
+    def test_the_jaws_never_move(self, fast_hello):
+        """Only 01's own output is searched, so the words may appear in the
+        other examples' runs without weakening this."""
+        text = output_of(fast_hello)
+        for moved in ("全行程", "到位", "夹住", "接触点", "方块", "下落"):
+            assert moved not in text, f"01 是只读样例，输出里不该有「{moved}」"
+
+    def test_it_says_it_is_read_only(self, fast_hello):
+        text = output_of(fast_hello)
+        assert "只读" in text
+        assert "不接真机" in text
+
+    def test_it_never_commands_motion(self):
+        """The source, not just this run: 01 must not call a motion method.
+
+        ``sim.step()`` is deliberately allowed — it is the window's event pump,
+        and with no command issued it advances a setpoint that already equals
+        the measured position, so it cannot move the jaws.  The docstring's
+        ``演示:`` list is not a call, so it is not what this reads.
+        """
+        tree = ast.parse(EXAMPLE_01.read_text(encoding="utf-8"))
+        called = {node.func.attr for node in ast.walk(tree)
+                  if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute)}
+        called |= {node.func.id for node in ast.walk(tree)
+                   if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        offenders = sorted(called & set(self.MOTION_CALLS))
+        assert not offenders, f"01 是只读样例，却调用了 {offenders}"
+
+    def test_a_bad_urdf_path_fails_loudly(self):
+        result = run(EXAMPLE_01, "--headless", "--urdf", "/nonexistent/g.urdf")
+        assert result.returncode != 0
+        assert "URDF" in output_of(result) or "urdf" in output_of(result)
+
+
+class TestExample02MoveSim:
+    """02 moves the jaws: the rate limit, and positioning by opening."""
+
+    def test_headless_run_succeeds(self, fast_move):
+        assert fast_move.returncode == 0, output_of(fast_move)
+
+    def test_it_walks_through_both_demos(self, fast_move):
+        text = output_of(fast_move)
+        for marker in ("[1] 全行程开合（速度受限）",
+                       "[2] 走到中间位（归一化开度）", "完成"):
+            assert marker in text, f"缺少 {marker} 段落"
+
+    def test_the_default_invocation_runs_to_completion(self):
+        """No flags at all beyond --headless: the documented happy path."""
+        result = run(EXAMPLE_02, "--headless")
+        assert result.returncode == 0, output_of(result)
+        assert "全行程" in output_of(result)
+
+    def test_a_slower_speed_is_accepted(self):
+        result = run(EXAMPLE_02, "--headless", "--speed", "0.02")
+        assert result.returncode == 0, output_of(result)
+
+    def test_the_grasp_options_are_not_here(self):
+        """02 does not grip, and the split must not leave the old flags behind
+        as silent no-ops: argparse has to refuse them."""
+        result = run(EXAMPLE_02, "--headless", "--object-mm", "60")
+        assert result.returncode == 2, output_of(result)
+
+    def test_a_bad_urdf_path_fails_loudly(self):
+        result = run(EXAMPLE_02, "--headless", "--urdf", "/nonexistent/g.urdf")
+        assert result.returncode != 0
+        assert "URDF" in output_of(result) or "urdf" in output_of(result)
+
+
+class TestExample03Grasp:
+    """03 is the one that grips, pulls and lets go."""
+
+    def test_headless_run_succeeds(self, fast_grasp):
+        assert fast_grasp.returncode == 0, output_of(fast_grasp)
+
+    def test_it_walks_through_all_three_demos(self, fast_grasp):
+        text = output_of(fast_grasp)
+        for marker in ("[1] 夹住一个 ", "[2] 往下拽，找摩擦力的极限",
+                       "[3] 松爪", "完成"):
+            assert marker in text, f"缺少 {marker} 段落"
+
+    def test_it_reports_the_grip_and_the_slip(self, fast_grasp):
         """The two pull tests are the point of the example."""
-        text = output_of(fast_01)
+        text = output_of(fast_grasp)
         assert "没动" in text          # 5 N: held by friction
         assert "滑了" in text          # 15 N: past the friction limit
 
-    def test_the_part_only_touches_the_fingers_while_held(self, fast_01):
-        assert "落在 link [0, 1]" in output_of(fast_01)
+    def test_the_part_only_touches_the_fingers_while_held(self, fast_grasp):
+        assert "落在 link [0, 1]" in output_of(fast_grasp)
 
-    def test_releasing_drops_the_part(self, fast_01):
-        assert "手指张开 → 方块下落" in output_of(fast_01)
+    def test_releasing_drops_the_part(self, fast_grasp):
+        assert "手指张开 → 方块下落" in output_of(fast_grasp)
 
-    def test_it_says_it_does_not_touch_real_hardware(self, fast_01):
-        assert "不接真机" in output_of(fast_01)
+    def test_it_says_it_does_not_touch_real_hardware(self, fast_grasp):
+        assert "不接真机" in output_of(fast_grasp)
 
     def test_a_bigger_object_and_a_stronger_grip_still_work(self):
-        result = run(EXAMPLE_01, "--headless", "--object-mm", "60",
+        result = run(EXAMPLE_03, "--headless", "--object-mm", "60",
                      "--force", "20", "--speed", "0.2", "--hold", "0.2")
         assert result.returncode == 0, output_of(result)
         assert "60 mm" in output_of(result)
 
-    def test_the_default_invocation_runs_to_completion(self):
-        """No flags at all beyond --headless: the documented happy path."""
-        result = run(EXAMPLE_01, "--headless")
-        assert result.returncode == 0, output_of(result)
-        assert "全行程" in output_of(result)
-
     def test_a_bad_urdf_path_fails_loudly(self):
-        result = run(EXAMPLE_01, "--headless", "--urdf", "/nonexistent/g.urdf")
+        result = run(EXAMPLE_03, "--headless", "--urdf", "/nonexistent/g.urdf")
         assert result.returncode != 0
         assert "URDF" in output_of(result) or "urdf" in output_of(result)
 
@@ -170,8 +280,8 @@ class TestExample05NeedsAWindow:
         assert result.returncode == 1
         text = output_of(result)
         assert "窗口" in text
-        # ...and points at the example that can run without one
-        assert "01_sim_only.py" in text
+        # ...and points at the examples that can run without one
+        assert "01_hello_sim.py" in text
 
 
 class TestExample05Status:

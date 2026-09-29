@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""样例 01 · 仅仿真：在 PyBullet 里驱动 LiteGrip 夹爪（无需真机、无需 CAN）
+"""样例 03 · 仿真夹取 — 夹住一个方块、找摩擦力的极限、松爪
 
-只用 litegrip_pybullet，不碰真机 SDK。演示一条完整的使用路径：
+只用 PyBullet：在两指之间放一个方块，按力上限收爪，然后往下拽，看摩擦力能扛到多少。
+「被工件顶住」时 settle() 返回 False，那是正常的——手指到不了目标，因为方块挡着。
 
-  1. 加载模型          自带 URDF（或 --urdf 指定），读开度/关节值
-  2. 速度受限的开合     一次全行程约 1 s（85 mm/s，真机的额定速度）
-  3. 走到中间位         按归一化开度命令，settle() 等它走完
-  4. 夹住一个方块       按 --object-mm 放个方块，按 --force 收爪
-                        —— settle() 返回 False 表示「被顶住了」，这是正常的
-  5. 往下拽            给方块加外力，看摩擦力够不够把工件夹住
-                        （--pull 应当夹得住，--slip 应当滑下去）
-  6. 交互               有窗口时实时显示状态，Esc/Q 退出
+演示:
+  sim.add_box(half_extents, position, mass=)   在两指中间放一个方块
+  sim.grasp_center() / sim.link_aabb(-1)       工件该放哪、夹爪底座顶面在哪
+  sim.command_fraction(0.0, force_n=)          收爪
+  sim.settle(timeout_s=)                       等它到位；被顶住时只能等到超时
+  sim.contacts(box)                            接触点（应当只落在两根手指上）
+  sim.finger_force_n()                         电机实际在推的力 [N]
+  p.applyExternalForce(...)                    加外力，量工件位移找摩擦极限
+  sim.command_fraction(1.0)                    松爪，方块掉下去
 
-本样例**不驱动真机**，随便跑。
-
-运行：
-  python3 examples/01_sim_only.py                       # 开窗口跑整套演示
-  python3 examples/01_sim_only.py --headless            # 无窗口（跑得快，exit 0）
-  python3 examples/01_sim_only.py --object-mm 60        # 换一个 60 mm 的方块
-  python3 examples/01_sim_only.py --force 20            # 20 N 夹持力
-  python3 examples/01_sim_only.py --speed 0.02          # 慢速收爪（约 2 s 全行程）
-  python3 examples/01_sim_only.py --slip 40             # 用 40 N 下拽，看它滑
+运行:
+  python3 examples/03_grasp.py                  # 开窗口跑三段演示
+  python3 examples/03_grasp.py --headless       # 无窗口（跑得快，exit 0）
+  python3 examples/03_grasp.py --object-mm 60 --force 20
+  python3 examples/03_grasp.py --slip 40        # 用 40 N 下拽，看它滑
 """
 import argparse
 import sys
@@ -31,7 +29,6 @@ from _common import add_common_args, status_line  # noqa: I001  (必须先于 li
 import pybullet as p
 
 from litegrip_pybullet import (
-    APERTURE_OPEN_MM,
     DEFAULT_VELOCITY_M_S,
     MAX_GRIP_FORCE_N,
     QUIT_KEYS,
@@ -49,7 +46,7 @@ BOX_HALF_Z_M = 0.015
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="样例 01 · 仅仿真：用 PyBullet 驱动 LiteGrip 夹爪（不接真机）",
+        description="样例 03 · 仿真夹取：夹住方块、找摩擦极限、松爪（不接真机）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     add_common_args(ap)
@@ -69,10 +66,6 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def banner(text: str) -> None:
-    print(f"\n── {text} " + "─" * max(0, 58 - len(text)))
-
-
 def show(sim: GripperSim, label: str = "仿真", *, force: bool = True) -> None:
     print(status_line(
         label,
@@ -80,35 +73,6 @@ def show(sim: GripperSim, label: str = "仿真", *, force: bool = True) -> None:
         aperture_mm=sim.aperture_mm(),
         force_n=sim.finger_force_n() if force else None,
     ))
-
-
-def demo_travel(sim: GripperSim, args: argparse.Namespace) -> None:
-    """全行程开合——顺便量一下速度受不受限。"""
-    banner("1/4 全行程开合（速度受限）")
-    for target, name in ((0.0, "闭合"), (1.0, "张开")):
-        sim.command_fraction(target, force_n=args.force, velocity_m_s=args.speed)
-        spent, reached = sim.settle()
-        flag = "到位" if reached else "没到位（被顶住了）"
-        print(f"   → {name}：用掉 {spent:.3f} s 仿真时间 · {flag}")
-        show(sim)
-    print(f"   单指行程 {STROKE_M * 1000:.2f} mm · 单指速度 {args.speed * 1000:.2f} mm/s"
-          f" → 期望单程 ≈ {STROKE_M / args.speed:.2f} s")
-    print(f"   两个手指对冲，所以开口变化的速度是这个的两倍："
-          f"{args.speed * 2000:.1f} mm/s（真机规格 85 mm/s）")
-
-
-def demo_midpoint(sim: GripperSim, args: argparse.Namespace) -> None:
-    """按归一化开度走到中间位——这是仿真和真机共用的「同一种语言」。"""
-    banner("2/4 走到中间位（归一化开度）")
-    for fraction in (0.5, 0.25, 0.75):
-        sim.command_fraction(fraction, force_n=args.force, velocity_m_s=args.speed)
-        spent, reached = sim.settle()
-        got = sim.fraction()
-        print(f"   命令 {fraction * 100:5.1f}% → 实测 {got * 100:5.1f}% · "
-              f"开口 {sim.aperture_mm():5.2f} mm · {spent:.3f} s · "
-              f"{'到位' if reached else '没到位'}")
-    sim.command_fraction(1.0)
-    sim.settle()
 
 
 def hold_part(sim: GripperSim, body: int, held: bool) -> None:
@@ -140,7 +104,7 @@ def grasp(sim: GripperSim, box: int, args: argparse.Namespace) -> tuple[float, b
 
 def demo_grasp(sim: GripperSim, args: argparse.Namespace) -> int:
     """夹一个方块：接触点数、实际夹持力、settle 的语义。"""
-    banner(f"3/4 夹住一个 {args.object_mm:g} mm 的方块（{args.force:g} N）")
+    print(f"\n[1] 夹住一个 {args.object_mm:g} mm 的方块（{args.force:g} N）")
     center = sim.grasp_center()
     half = args.object_mm / 2000.0  # mm → 半宽 [m]
     box = sim.add_box([half, BOX_HALF_Z_M, BOX_HALF_Z_M], center, mass=BOX_MASS_KG)
@@ -180,7 +144,7 @@ def pull(sim: GripperSim, box: int, force_n: float, seconds: float) -> float:
 
 def demo_pull(sim: GripperSim, box: int, args: argparse.Namespace) -> None:
     """往下拽工件：先小力（夹得住），再大力（滑下去）。"""
-    banner("4/4 往下拽，找摩擦力的极限")
+    print("\n[2] 往下拽，找摩擦力的极限")
     for force_n, expect in ((args.pull, "应当夹得住"), (args.slip, "应当会滑")):
         moved = pull(sim, box, force_n, args.hold)
         slipped = moved < -2.0
@@ -199,7 +163,7 @@ def demo_release(sim: GripperSim, box: int, args: argparse.Namespace) -> None:
     张嘴它几乎不动（实测 0.3 mm），什么也说明不了。所以先摆回空中重夹一次——
     这才是「松爪 → 工件掉下去」该有的样子。
     """
-    banner("收尾：松爪")
+    print("\n[3] 松爪")
     center = sim.grasp_center()
     base_top = sim.link_aabb(-1)[1][2]
     z_before = p.getBasePositionAndOrientation(
@@ -232,11 +196,18 @@ def interactive(sim: GripperSim) -> None:
     """有窗口时：实时刷状态，Esc/Q 或关窗退出。"""
     if not sim.gui:
         return
-    banner("交互：Esc / Q 或直接关窗口退出")
+    print("\n[4] 实时状态（Esc / Q 退出）")
     while sim.connected():
         if pressed(sim.keyboard_events(), QUIT_KEYS):
-            print("   收到退出键")
+            print("\n   收到退出键")
             break
+        line = status_line(
+            "仿真",
+            fraction=sim.fraction(),
+            aperture_mm=sim.aperture_mm(),
+            force_n=sim.finger_force_n(),
+        )
+        print(line, end="\r")
         sim.status_text(
             f"开度 {sim.fraction() * 100:5.1f}%  "
             f"开口 {sim.aperture_mm():5.2f} mm  "
@@ -244,24 +215,21 @@ def interactive(sim: GripperSim) -> None:
         )
         if not sim.step():
             break
+    print()
 
 
 def main() -> int:
     args = parse_args()
     args.force = max(0.0, min(MAX_GRIP_FORCE_N, args.force))
 
-    print("样例 01 · 仅仿真（不接真机，不会动真机）")
+    print("样例 03 · 仿真夹取（不接真机，不会动真机）")
     sim = GripperSim(urdf_path=args.urdf, gui=not args.headless,
                      max_force_n=args.force, velocity_m_s=args.speed)
     try:
         print(f"   URDF      {sim.urdf_path}")
         print(f"   手指关节  {sim.finger_joints}")
-        print(f"   初始状态  {sim.fraction() * 100:.1f}% · "
-              f"开口 {sim.aperture_mm():.2f} mm")
         sim.focus_camera()
 
-        demo_travel(sim, args)
-        demo_midpoint(sim, args)
         box = demo_grasp(sim, args)
         demo_pull(sim, box, args)
         demo_release(sim, box, args)

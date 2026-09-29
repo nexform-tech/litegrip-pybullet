@@ -695,7 +695,8 @@ def main() -> int:
     if args.headless:
         raise SystemExit(
             "❌ 样例 05 靠窗口里的滑条来设目标，没有窗口就没法操作。\n"
-            "   想看无窗口的纯仿真请用 examples/01_sim_only.py；\n"
+            "   想看无窗口的纯仿真请用 examples/01_hello_sim.py（只读）"
+            " 或 examples/02_move_sim.py；\n"
             "   想看真机 → 仿真（不需要操作）请用 examples/04_mirror_real.py。"
         )
 
@@ -753,7 +754,7 @@ def main() -> int:
             raise SystemExit(
                 "❌ 建不出滑条（PyBullet 的 addUserDebugParameter 只在 GUI 连接下"
                 "可用）。\n   检查是否真的有可用显示，或改用 "
-                "examples/01_sim_only.py。"
+                "examples/02_move_sim.py。"
             )
         dry_rad = fraction_to_target_rad(gripper, start_fraction)
 

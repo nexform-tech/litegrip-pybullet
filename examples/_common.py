@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """_common.py — LiteGrip PyBullet 样例的共用启动样板。
 
-三个样例（01/04/05）共享这里的东西：
+五个样例（01–05）共享这里的东西：
 
   ensure_deps()      缺 pybullet 时自动改用仓库自带 .venv 重跑
   import_litegrip()  导入真机 SDK（已安装 / 同级 lite-grip 仓库 / $LITEGRIP_SDK_DIR）
@@ -19,7 +19,7 @@
 ⚠️ 04/05 会驱动真机！真机的两个手指会真的闭合。首次跑请：
   1) 把夹爪拿在手上或固定在台面上，**手指行程内不要放任何东西**；
   2) 手放在电源开关旁边；
-  3) 先用 --dry-run（02）跑一遍看看流程。
+  3) 先用 --dry-run（05）跑一遍看看流程。
 
 ⚠️ 每次跑都要**先选定这台夹爪的标定文件**（见 :func:`choose_calibration_file`）：
 标定的角度/毫米刻度是从这台机器上量出来的，用别人（或出厂）的那份算目标角，
@@ -98,7 +98,7 @@ def bootstrap_src() -> None:
 def ensure_deps() -> None:
     """当前 python 缺 pybullet 时，自动改用仓库自带 .venv 重跑。
 
-    这样 ``python3 examples/01_sim_only.py`` 开箱即用，不必先 pip install。
+    这样 ``python3 examples/01_hello_sim.py`` 开箱即用，不必先 pip install。
     """
     if _REEXEC_FLAG in os.environ:  # 已经重跑过一次，别再套娃
         return
