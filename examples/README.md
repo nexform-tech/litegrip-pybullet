@@ -100,9 +100,9 @@ output never claims a motion happened.
 
 The same gripper, now driven, still with nothing but PyBullet:
 
-1. **Speed-limited travel** — a full stroke takes ~1 s, because the ramp is
-   limited to 85 mm/s, the hardware's rated speed. The fingers close on each
-   other, so the *gap* changes at twice that.
+1. **Speed-limited travel** — a full stroke takes ~1 s: each finger ramps at
+   42.73 mm/s, and because the two fingers close on each other the *gap* changes
+   at twice that — the hardware's rated 85 mm/s.
 2. **Midpoint positioning** — command a normalised opening, and `settle()` waits
    for the jaws to actually arrive.
 
