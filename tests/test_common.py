@@ -63,16 +63,48 @@ class TestFractionToTargetRad:
             cfg.pos_closed_rad - 60.0 / cfg.rad_to_mm
         )
 
-    def test_matches_the_sdk_goto_formula(self):
-        """Same arithmetic as ``goto(position_mm)`` — just spelled out."""
+    def test_it_agrees_with_the_sdk_goto_formula_on_a_consistent_file(self):
+        """Where the two can agree, they do.
+
+        On a file whose ``rad_to_mm`` was derived from the same
+        ``max_stroke_mm`` the SDK carries (``rad_to_mm == max_stroke_mm /
+        travel``), going through millimetres and going through the travel are
+        the same arithmetic.  The next test is the case where they are not.
+        """
         gripper = _config()
         cfg = gripper.config
+        assert cfg.rad_to_mm * (cfg.pos_closed_rad - cfg.pos_open_rad) == \
+            pytest.approx(cfg.max_stroke_mm)
         for fraction in (0.0, 0.25, 0.6, 1.0):
             position_mm = fraction * cfg.max_stroke_mm
             expected = cfg.pos_closed_rad - position_mm / cfg.rad_to_mm
             assert _common.fraction_to_target_rad(
                 gripper, fraction
             ) == pytest.approx(expected)
+
+    def test_a_file_with_a_different_mm_scale_still_reaches_full_open(self):
+        """The regression test for the saturating slider.
+
+        The file this machine actually has has ``rad_to_mm = 61.01`` over a
+        1.41 rad travel — a 86 mm scale — while ``load_calibration`` leaves
+        ``max_stroke_mm`` at the SDK's default 120.  Mapping through
+        ``position_mm / max_stroke_mm`` tops out at ``86 / 120 = 71.7 %``: the
+        top of the slider did nothing, and 50 % of the slider asked for 70 % of
+        the travel.  Normalising over the travel has no such premise, so the
+        ends have to land exactly on the calibrated ends.
+        """
+        travel = 1.409552
+        pos_closed, pos_open = 0.052071, 0.052071 - travel
+        gripper = _config(pos_closed_rad=pos_closed, pos_open_rad=pos_open,
+                          rad_to_mm=86.0 / travel, max_stroke_mm=120.0)
+
+        assert _common.fraction_to_target_rad(
+            gripper, 1.0) == pytest.approx(pos_open)
+        assert _common.fraction_to_target_rad(
+            gripper, 0.5) == pytest.approx(pos_closed - travel / 2.0)
+        # Half the slider is half the travel — not the 70 % the old map gave.
+        assert _common.fraction_to_target_rad(
+            gripper, 0.5) != pytest.approx(pos_closed - 60.0 / gripper.config.rad_to_mm)
 
     def test_rad_decreases_as_the_gripper_opens(self):
         """Open is the *negative* direction — the sign the SDK's goto implies."""
@@ -542,12 +574,24 @@ class TestRadToFraction:
         assert _common.rad_to_fraction(gripper, 100.0) == 0.0
         assert _common.rad_to_fraction(gripper, -100.0) == 1.0
 
-    def test_zero_stroke_does_not_divide_by_zero(self):
-        gripper = _config(max_stroke_mm=0.0)
+    def test_zero_travel_does_not_divide_by_zero(self):
+        """The divisor is the travel, so a degenerate calibration is the case
+        that has to be caught — ``max_stroke_mm`` never enters this function."""
+        gripper = _config(pos_open_rad=0.114)     # travel == 0
         assert _common.rad_to_fraction(gripper, 0.0) == 0.0
 
+    def test_a_zero_mm_scale_does_not_change_the_reading(self):
+        """``rad_to_mm`` is not part of this mapping either."""
+        assert _common.rad_to_fraction(_config(max_stroke_mm=0.0),
+                                       0.0) == \
+            _common.rad_to_fraction(_config(), 0.0)
+
     def test_the_reading_the_hardware_actually_gave(self):
-        """``get_state`` on can0 reported 29.85 mm → 24.9 % of the SDK scale."""
+        """``get_state`` on can0 reported 29.85 mm on the SDK's mm scale.
+
+        On a self-consistent file that is ``29.85 / 120 = 24.9 %`` of the
+        travel, and that is what the window should render.
+        """
         gripper = _config()
         cfg = gripper.config
         rad = cfg.pos_closed_rad - 29.85 / cfg.rad_to_mm

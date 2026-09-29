@@ -764,15 +764,19 @@ class TestCalibrationArithmetic:
     """The slider → rad path, with the hardware's real numbers."""
 
     def test_closed_and_open_map_to_the_travel_ends(self):
+        """Both ends land on the calibrated angles, to float round-off.
+
+        They used to be mapped through millimetres, which put the open end a
+        hair short (and, on a file whose ``rad_to_mm`` belongs to a different
+        ``max_stroke_mm`` than the SDK's default, stopped the slider reaching
+        the open end at all).  Normalising over the travel makes the ends the
+        ends; the 1e-12 tolerance is the subtraction's own round-off, not a
+        physical shortfall.
+        """
         gripper = FakeGripper()
-        assert ex02.fraction_to_target_rad(gripper, 0.0) == pytest.approx(POS_CLOSED_RAD)
-        # The open end lands a hair short of ``pos_open_rad``: the calibration
-        # file's own numbers disagree by 0.00003 rad (max_stroke_mm/rad_to_mm =
-        # 1.840209 rad of travel vs the recorded travel_range_rad of 1.840238).
-        # That is 2 µm of finger travel — far below anything that matters, but
-        # it is why this tolerance is not zero.
-        assert ex02.fraction_to_target_rad(gripper, 1.0) == pytest.approx(
-            POS_OPEN_RAD, abs=1e-3)
+        assert ex02.fraction_to_target_rad(gripper, 0.0) == POS_CLOSED_RAD
+        assert ex02.fraction_to_target_rad(
+            gripper, 1.0) == pytest.approx(POS_OPEN_RAD, abs=1e-12)
 
     def test_the_mapping_round_trips(self):
         gripper = FakeGripper()

@@ -224,9 +224,18 @@ def _run(monkeypatch, gripper=None, steps=60, keys_at=None, on_tick=None,
 
 
 def fraction_of(rad: float) -> float:
-    """The mirror value example 03 should render for ``rad``."""
+    """The mirror value example 03 should render for ``rad``.
+
+    Normalised over the *calibrated travel* — the two angles the calibration
+    actually measured.  Deliberately not ``(closed − rad) × rad_to_mm /
+    max_stroke_mm``: that route saturates partway when the file's ``rad_to_mm``
+    was derived from a different ``max_stroke_mm`` than the SDK's default, and
+    the mirror then cannot show the jaws fully open.  See
+    ``_common.rad_to_fraction``.
+    """
     return max(0.0, min(1.0,
-                       (POS_CLOSED_RAD - rad) * RAD_TO_MM / MAX_STROKE_MM))
+                       (POS_CLOSED_RAD - rad)
+                       / (POS_CLOSED_RAD - POS_OPEN_RAD)))
 
 
 class TestMirroring:
@@ -234,6 +243,21 @@ class TestMirroring:
         run = _run(monkeypatch, steps=40)
         assert run.sim.mirrored, "一次都没刷新仿真"
         assert run.sim.mirrored[-1] == pytest.approx(fraction_of(START_RAD))
+
+    def test_the_mirror_reaches_both_ends_of_the_travel(self, monkeypatch):
+        """A gripper at either end has to read 0.0 / 1.0 in the window.
+
+        This is the regression test for the saturating mapping: on a
+        calibration whose mm scale is not the SDK's nominal 120, the mirror
+        used to top out around 72 % and the simulated jaws could never be shown
+        fully open, whatever the real ones did.
+        """
+        gripper = FakeGripper()
+        assert ex03.rad_to_fraction(gripper, POS_CLOSED_RAD) == pytest.approx(0.0)
+        assert ex03.rad_to_fraction(gripper, POS_OPEN_RAD) == pytest.approx(1.0)
+        # ...and the middle of the travel reads 0.5, not 0.7.
+        middle = (POS_CLOSED_RAD + POS_OPEN_RAD) / 2.0
+        assert ex03.rad_to_fraction(gripper, middle) == pytest.approx(0.5)
 
     def test_it_holds_the_measured_position_without_moving_it(self, monkeypatch):
         """A hold frame commands no motion: target = where the motor already is."""

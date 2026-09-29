@@ -63,6 +63,13 @@ what you would measure with calipers. They are not the same number and they are
 not a unit conversion apart — only the normalised opening means the same thing
 on both sides, which is why every example converts through it.
 
+**The examples convert between radians and the normalised opening directly, not
+through millimetres**, because `120` is the SDK's *default* `max_stroke_mm` and a
+calibration file carries whatever scale it was saved with. `rad_to_mm` is derived
+at calibration time from a stroke length the loader never writes back, so the two
+can disagree; when they do, `position_mm / max_stroke_mm` saturates partway and
+the top of the slider does nothing. See `_common.fraction_to_target_rad`.
+
 ## The examples
 
 ### 01 — simulation only
