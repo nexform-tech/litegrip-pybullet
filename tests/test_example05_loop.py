@@ -636,6 +636,9 @@ class TestStatusReportsMeasuredValues:
         expected = ex02.rad_to_fraction(gripper, gripper.position_rad) * 100
         assert f"{expected:5.1f}%" in out
         assert "6.63 mm" not in out, "又把「从没读到过」的 0.0 当成位置打印了"
+        # The healthy line, spelled out here so the assertion below cannot pass by
+        # the string having simply disappeared from the source.
+        assert "没有故障" in out
         assert code == 0
 
     def test_no_frame_means_no_readout_instead_of_a_fake_one(self, monkeypatch, capsys):
@@ -648,7 +651,7 @@ class TestStatusReportsMeasuredValues:
         # mention 「5.5%」, but only to explain what the old fabricated print was.)
         assert "开口" not in out and "6.63 mm" not in out, \
             "读不到实测值时还是把 SDK 的初值当读数打印了"
-        assert "✅ 没有故障" not in out
+        assert "没有故障" not in out
 
     def test_the_watchdog_registers_read_value_is_what_gets_reported(self, monkeypatch, capsys):
         """The register is read live, so both of its values come out as read.
