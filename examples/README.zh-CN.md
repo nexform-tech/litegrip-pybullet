@@ -1,21 +1,23 @@
 # LiteGrip PyBullet 样例
 
-三个可以直接跑的程序，从三个方向看同一个夹爪模型：只跑仿真、仿真驱动真机、
-真机驱动仿真。
+五个可以直接跑的程序，一层层往下走：读状态、让它动、夹住东西，再把仿真和真机
+接起来（两个方向）。
 
 [English](README.md) · **简体中文**
 
 | 文件 | 方向 | 需要真机？ |
 | --- | --- | --- |
-| [`01_sim_only.py`](01_sim_only.py) | —（纯 PyBullet） | **不需要** |
-| [`02_sim_to_real.py`](02_sim_to_real.py) | 仿真 → 真机 | 要真的动就需要 |
-| [`03_real_to_sim.py`](03_real_to_sim.py) | 真机 → 仿真 | 要真的镜像就需要 |
+| [`01_hello_sim.py`](01_hello_sim.py) | 只读状态，不动 | **不需要** |
+| [`02_move_sim.py`](02_move_sim.py) | 只跑仿真 | **不需要** |
+| [`03_grasp.py`](03_grasp.py) | 只跑仿真 | **不需要** |
+| [`04_mirror_real.py`](04_mirror_real.py) | 真机 → 仿真 | 要真的镜像就需要 |
+| [`05_dual_control.py`](05_dual_control.py) | 仿真 → 真机 | 要真的动就需要 |
 
 ## 运行前准备
 
 ```bash
 python3 -m pip install pybullet                # 01–03 都要
-python3 -m pip install -e /path/to/lite-grip   # 02–03（要接真机）
+python3 -m pip install -e /path/to/lite-grip   # 04–05（要接真机）
 ```
 
 真机 SDK **没有发布到 PyPI**：`pip install litegrip` 装到的不是它，而已发布的版本
@@ -26,7 +28,7 @@ python3 -m pip install -e /path/to/lite-grip   # 02–03（要接真机）
 export LITEGRIP_SDK_DIR=/path/to/lite-grip
 ```
 
-后两条都没有时，02/03 会在启动时列出它们需要的 SDK 接口（`LiteGrip.refresh_status`
+后两条都没有时，04/05 会在启动时列出它们需要的 SDK 接口（`LiteGrip.refresh_status`
 与 `GripperState.data_age_s` / `has_data` / `is_stale`）并退出，而不是在控制循环里
 才炸。
 
@@ -34,14 +36,14 @@ export LITEGRIP_SDK_DIR=/path/to/lite-grip
 不需要别的：URDF 和网格已经打包在 `src/litegrip_pybullet/assets/litegrip_urdf/`
 里，克隆下来就能跑。
 
-02/03 之前先把 CAN 起起来：
+04/05 之前先把 CAN 起起来：
 
 ```bash
 sudo ip link set can0 up type can bitrate 1000000
 ip -details link show can0
 ```
 
-> **样例 02 和 03 会驱动真机。** 先读[「上真机之前」](#上真机之前)。
+> **样例 04 和 05 会驱动真机。** 先读[「上真机之前」](#上真机之前)。
 
 ## 一个开度，三种写法
 
@@ -64,30 +66,111 @@ SDK 毫米是夹爪自己的 `goto(mm)` 用的刻度，钳口间隙是拿卡尺�
 `position_mm / max_stroke_mm` 会在中途饱和，滑条顶上一段推了不动。见
 `_common.fraction_to_target_rad`。
 
-## 样例说明
+## 五个样例
 
-### 01 —— 仅仿真
+### 01 —— 只读状态
 
-不接真机、不碰 CAN、不用 SDK。四段走完模型的全貌：
+加载模型、读它现在在哪，**一个运动指令都不发**。不接真机、不碰 CAN、不用 SDK——
+文件里也没有任何运动调用：`sim.step()` 只推进窗口事件和时钟，放多久手指都不会动。
+
+1. **模型常量** —— 手指数量、单指行程、自带 URDF 实际的钳口开度，以及生效的力上限。
+2. **当前开度，三种写法** —— 归一化开度、钳口间隙（mm）、SDK 标定刻度（mm）并排。
+3. **实时状态行** —— 开着窗口就一直刷新，按 **Esc** 或 **Q** 退出。
+
+```bash
+python3 examples/01_hello_sim.py                # 开窗口，跑整套演示
+python3 examples/01_hello_sim.py --headless     # 无窗口，exit 0
+```
+
+「只读」是被检查过的、不是嘴上说的：`tests/test_examples_cli.py` 会解析这个文件，
+不许它出现任何运动调用（`command_fraction`、`command_joint`、`reset_fraction`、
+`settle`、`run_for`、`add_box`），另外还会断言它的输出里没有「动过了」这种话。
+
+### 02 —— 仿真运动
+
+同一个夹爪，这回真的下命令了，但仍然只有 PyBullet：
 
 1. **速度受限的行程** —— 一次全行程约 1 s，因为斜坡被限制在 85 mm/s（真机的额定
    速度）。两个手指是对冲的，所以**开口**变化的速度是这个的两倍。
 2. **中间位定位** —— 按归一化开度下命令，`settle()` 等它真的走到。
-3. **夹持** —— 两指中间放个方块，按力上限收爪，读回接触点和电机推力。这里
-   `settle()` 返回 `False` 才是对的，不是失败：手指被工件顶住了。
-4. **下拽** —— 给工件加向下的力，找摩擦力的极限。5 N 夹得住，15 N 就滑了。
 
 ```bash
-python3 examples/01_sim_only.py                 # 开窗口，跑整套演示
-python3 examples/01_sim_only.py --headless      # 无窗口，exit 0
-python3 examples/01_sim_only.py --object-mm 60 --force 20
-python3 examples/01_sim_only.py --slip 40       # 一定会滑的拉力
+python3 examples/02_move_sim.py                 # 开窗口，跑两段演示
+python3 examples/02_move_sim.py --headless      # 无窗口，exit 0
+python3 examples/02_move_sim.py --speed 0.02    # 慢速：全行程约 2 s
+python3 examples/02_move_sim.py --force 20      # 20 N 夹持力上限
 ```
 
-第 3 步的夹持是真的摩擦，不是「搁在台沿上」：工件悬在两指之间，而且**只碰到两根
+**别**在这里找 `--object-mm`、`--hold`、`--pull`、`--slip`：这个样例没有工件可夹也
+没得拽，argparse 会直接以 exit 2 拒绝这些参数，而不是当作没看见。它们是 03 的。
+
+### 03 —— 仿真夹取
+
+两指之间放个方块，按力上限收爪，然后往下拽：
+
+1. **夹持** —— 40 mm 的方块放在抓取中心，按力上限收爪，读回接触点和电机推力。这里
+   `settle()` 返回 `False` 才是对的，不是失败：手指被工件顶住了。
+2. **下拽** —— 给工件加向下的力，找摩擦力的极限。5 N 夹得住，15 N 就滑了。
+3. **松爪** —— 张开手指，方块落到夹爪底座上：只靠摩擦的夹持，手指一张开就没有了。
+
+```bash
+python3 examples/03_grasp.py                    # 开窗口，跑整套演示
+python3 examples/03_grasp.py --headless         # 无窗口，exit 0
+python3 examples/03_grasp.py --object-mm 60 --force 20
+python3 examples/03_grasp.py --slip 40          # 一定会滑的拉力
+```
+
+第 1 步的夹持是真的摩擦，不是「搁在台沿上」：工件悬在两指之间，而且**只碰到两根
 手指**。怎么做到的见[「说明」](#说明)。
 
-### 02 —— 仿真控制真机
+### 04 —— 真机控制仿真
+
+真机是「主」，仿真只是显示器。每帧读一次真机位置，用 `reset_fraction()` 把仿真
+手指瞬移过去——纯运动学、不跑动力学——所以窗口显示的就是真机此刻的样子，没有跟随
+延迟，也不会自己漂。
+
+两种用法：
+
+- **用手推着看**（`--zero-gravity`，推荐）：电机失力，可以用手推动手指，窗口跟着
+  你的手走。运行中按 **Z** 可以随时切换失力/使能。
+- **看别人的程序驱动**（`--passive`）：本样例只连接、只读，**不使能**，一帧都不发；
+  喂真机的事归那个程序。
+
+```bash
+python3 examples/04_mirror_real.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/04_mirror_real.py                  # 只镜像（发锁位帧保活）
+python3 examples/04_mirror_real.py --passive        # 不使能、一帧不发，等别人喂
+python3 examples/04_mirror_real.py --headless       # 只看终端读数
+python3 examples/04_mirror_real.py --duration 10    # 10 s 后自动退出
+```
+
+和 05 一样，每次都得出示标定文件，见[「上真机之前」](#上真机之前)。
+
+#### 为什么「只是看」也得持续发帧
+
+**使能态**的电机连续约 **0.9 s** 收不到任何帧，就锁进通信丢失故障（0xD）——同样是
+红灯闪、位置照读、指令一律不执行。这 0.9 s 是 SDK 在自己硬件上量出来的；`TIMEOUT`
+寄存器（RID 9）给不出它（一读 8000 ms、一读 0），SDK 把这条标成「待查」，所以这里
+按实测走。不喂帧地守着 PyBullet 窗口看几秒，就足以把真机看哑。
+
+所以本样例的默认模式并不是只读：它以 200 Hz 发「**锁在实测位置**」的保持帧——目标是
+它现在所在的位置、零速度、零前馈，不命令任何运动，只是让手指有刚度、把超时计数器喂
+上。想用手推着看镜像就加 `--zero-gravity`（或按 Z），那同样是持续发帧，只是 kp/kd
+都归零。
+
+真的要让**别的程序**驱动真机时加 `--passive`：本样例**不使能**、一帧都不发，Z 键也
+一并禁掉，免得两边发的帧互相打架。代价是那个程序必须自己喂帧，否则约 0.9 s 后真机照锁
+0xD。**单跑别加 `--passive`。**（不使能这件事本身也重要：使能了却没人喂帧，正是上面那条
+故障的触发条件。）
+
+`--zero-gravity`（或按 Z）让夹爪变**软**，手指可以被推动，也会因为重力自己滑。使能
+之前先托住夹爪。
+
+退出时**失能**（`disable()`，0xFD），而不是补发一帧 `exit_zero_gravity()`：那一帧
+之后没人再喂，使能态的电机一秒内就锁 0xD，而能清故障的进程已经退出了。所以退出后
+真机是松的，手指可能因自重滑动——需要保持位置就先托住。
+
+### 05 —— 仿真控制真机
 
 窗口同时是两样东西：三个**下发指令**的滑条，和一面**显示真机在哪**的镜子。使能之后
 真机不动——样例先读一次当前位置、显示在窗口里、就地锁住，**拖动滑条它才动**。
@@ -110,10 +193,10 @@ python3 examples/01_sim_only.py --slip 40       # 一定会滑的拉力
 电机静默约 0.9 s 就会闩上通信丢失故障（0xD），**停着不动才是出事的那一个**。
 
 ```bash
-python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
-python3 examples/02_sim_to_real.py --dry-run         # 只开窗口，绝不碰 CAN
-python3 examples/02_sim_to_real.py --speed 40        # 速度滑条从 40% 起步
-python3 examples/02_sim_to_real.py --force 20 --channel can1
+python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/05_dual_control.py --dry-run         # 只开窗口，绝不碰 CAN
+python3 examples/05_dual_control.py --speed 40        # 速度滑条从 40% 起步
+python3 examples/05_dual_control.py --force 20 --channel can1
 ```
 
 `--calib` 每次都要给，`--dry-run` 也不例外；不给的话样例会列出候选让你选，见
@@ -148,7 +231,7 @@ MIT 的位置项是 `kp × (q目标 − q实际)`，而 kp 是**标定文件里�
 `2.8 Nm`；要靠位置项吸收它，需要 `2.8 / kp = 0.56 rad` 的误差（kp = 5.0），而那是
 行程的 40%——位置环填不满这个误差，机械只好反向走一段把它补出来，看上去就是回弹。
 
-所以 02 在到位前先减速：剩余距离不够维持当前速度时，命令速度取
+所以 05 在到位前先减速：剩余距离不够维持当前速度时，命令速度取
 `√(2·a·剩余距离)`，其中 `a = 满速 / 0.15 s`（`RAMP_DOWN_S`）。这个速度**永远
 不高于**限速，所以限速仍然是硬边界；它只让最后几帧慢下来，停下前那一帧不到满速的
 7%，反号出来的阻尼约 `0.17 Nm` 而不是 `2.8 Nm`。整段行程比按限速走完最多多花
@@ -160,8 +243,8 @@ SDK 自己的 `_move_at_speed_rad` **没有**这一段——它把 `dq` 一直�
 #### 真机「能读不能控」了怎么办
 
 ```bash
-python3 examples/02_sim_to_real.py --status                  # 只连、只读，一帧不发
-python3 examples/02_sim_to_real.py --status --clear-fault    # 清掉锁死的故障
+python3 examples/05_dual_control.py --status                  # 只连、只读，一帧不发
+python3 examples/05_dual_control.py --status --clear-fault    # 清掉锁死的故障
 ```
 
 `--status` 不开窗口、不使能、**不发送任何运动指令**，只把错误码读出来并翻译成人话，
@@ -194,7 +277,7 @@ python3 examples/02_sim_to_real.py --status --clear-fault    # 清掉锁死的�
    寄存器 TIMEOUT=0 · CTRL_MODE=1 · UV_Value=15 · OC_Value=0.8 · OT_Value=100
    ⏱  通信超时保护（TIMEOUT, RID 9）= 0（这个寄存器当前不生效）
    ⚠️  别拿这个寄存器当依据：实测**使能态**的电机静默约 0.9 s 就锁 0xD 通信丢失故障，与寄存器读数对不上（这台机器读到过 8000，也读到过 0），SDK 自己把这条标成「待查」。
-      所以 02/03 空闲时照 200 Hz 持续发帧，不赌这个数字；只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
+      所以 04/05 空闲时照 200 Hz 持续发帧，不赌这个数字；只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
 ```
 
 （2026-09-28 在本机采的，电机未使能、无故障，退出码 0。）样例两种情况都照发帧：
@@ -217,59 +300,12 @@ ip -details -statistics link show can0      # 总线忙不忙：要没人跑时�
 5 ms 循环里不让出控制权——PyBullet 窗口会卡住，按键也读不到。公开的帧级 API 就是
 为这种场合准备的，斜坡的插值方式照抄 SDK 的 `_move_at_speed_rad`。
 
-### 03 —— 真机控制仿真
-
-真机是「主」，仿真只是显示器。每帧读一次真机位置，用 `reset_fraction()` 把仿真
-手指瞬移过去——纯运动学、不跑动力学——所以窗口显示的就是真机此刻的样子，没有跟随
-延迟，也不会自己漂。
-
-两种用法：
-
-- **用手推着看**（`--zero-gravity`，推荐）：电机失力，可以用手推动手指，窗口跟着
-  你的手走。运行中按 **Z** 可以随时切换失力/使能。
-- **看别人的程序驱动**（`--passive`）：本样例只连接、只读，**不使能**，一帧都不发；
-  喂真机的事归那个程序。
-
-```bash
-python3 examples/03_real_to_sim.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
-python3 examples/03_real_to_sim.py                  # 只镜像（发锁位帧保活）
-python3 examples/03_real_to_sim.py --passive        # 不使能、一帧不发，等别人喂
-python3 examples/03_real_to_sim.py --headless       # 只看终端读数
-python3 examples/03_real_to_sim.py --duration 10    # 10 s 后自动退出
-```
-
-和 02 一样，每次都得出示标定文件，见[「上真机之前」](#上真机之前)。
-
-#### 为什么「只是看」也得持续发帧
-
-**使能态**的电机连续约 **0.9 s** 收不到任何帧，就锁进通信丢失故障（0xD）——同样是
-红灯闪、位置照读、指令一律不执行。这 0.9 s 是 SDK 在自己硬件上量出来的；`TIMEOUT`
-寄存器（RID 9）给不出它（一读 8000 ms、一读 0），SDK 把这条标成「待查」，所以这里
-按实测走。不喂帧地守着 PyBullet 窗口看几秒，就足以把真机看哑。
-
-所以本样例的默认模式并不是只读：它以 200 Hz 发「**锁在实测位置**」的保持帧——目标是
-它现在所在的位置、零速度、零前馈，不命令任何运动，只是让手指有刚度、把超时计数器喂
-上。想用手推着看镜像就加 `--zero-gravity`（或按 Z），那同样是持续发帧，只是 kp/kd
-都归零。
-
-真的要让**别的程序**驱动真机时加 `--passive`：本样例**不使能**、一帧都不发，Z 键也
-一并禁掉，免得两边发的帧互相打架。代价是那个程序必须自己喂帧，否则约 0.9 s 后真机照锁
-0xD。**单跑别加 `--passive`。**（不使能这件事本身也重要：使能了却没人喂帧，正是上面那条
-故障的触发条件。）
-
-`--zero-gravity`（或按 Z）让夹爪变**软**，手指可以被推动，也会因为重力自己滑。使能
-之前先托住夹爪。
-
-退出时**失能**（`disable()`，0xFD），而不是补发一帧 `exit_zero_gravity()`：那一帧
-之后没人再喂，使能态的电机一秒内就锁 0xD，而能清故障的进程已经退出了。所以退出后
-真机是松的，手指可能因自重滑动——需要保持位置就先托住。
-
 ## 上真机之前
 
 两个真机样例都会先打印安全横幅，使用姿势是：夹爪拿在手上或固定在台面上，
-**行程内不放任何东西**，电源开关触手可及。02 的第一次跑应当是 `--dry-run`。
+**行程内不放任何东西**，电源开关触手可及。05 的第一次跑应当是 `--dry-run`。
 
-02 第一次真机跑看起来会像「什么都没发生」，这是对的：电机已使能、窗口显示的是夹爪
+05 第一次真机跑看起来会像「什么都没发生」，这是对的：电机已使能、窗口显示的是夹爪
 **现在**的位置，你不拖开度滑条它就一直待在原地。全程手别伸进行程里——动起来是在你拖动
 的那一刻，不是按某个键的那一刻。
 
@@ -280,11 +316,11 @@ ip -details link show can0
 ```
 
 **先选定这台夹爪的标定文件。** 凡是碰真机的路径都从这里开始——`--status`、
-`--dry-run`、03 的 `--passive` 也一样——而且**不接受**默认标定：
+`--dry-run`、04 的 `--passive` 也一样——而且**不接受**默认标定：
 
 ```bash
-python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
-python3 examples/02_sim_to_real.py            # 不给 --calib：它会列出候选让你选
+python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/05_dual_control.py            # 不给 --calib：它会列出候选让你选
 ```
 
 不给 `--calib` 时，会把 `~/.litegrip` 下的候选连同修改时间和关键值（闭合/张开角度、
@@ -305,7 +341,7 @@ SDK 的 `load_calibration` 在路径读不出来时会**静默改用打包的出
 
 **为什么合爪的时候要「扶住」工件。** 合爪大约要 1 s，而一个 40 mm 的工件放在抓取
 中心后，这 1 s 里会自由落体约 24 mm 掉到夹爪底座上。那之后它就是**坐在底座上**，
-不是被手指夹住的，对它做摩擦测试什么也测不出来。所以样例 01 在合爪期间把工件的
+不是被手指夹住的，对它做摩擦测试什么也测不出来。所以样例 03 在合爪期间把工件的
 质量设为 0（PyBullet 会把它当静态体），合上之后再恢复——此后就只有手指碰得到它。
 这是仿真里的技巧，不是物理现象；`tests/test_sim.py::close_in` 用的是同一招。
 
@@ -314,5 +350,5 @@ SDK 的 `load_calibration` 在路径读不出来时会**静默改用打包的出
 
 **共用的部分。** [`_common.py`](_common.py) 放着参数解析、SDK 查找、标定选择
 （`choose_calibration_file`、候选列表、「这份文件到底生效了没有」的核实）、连接/使能
-流程、单位换算和状态行。它不是第四个样例——另外三个都 import 它，所以每个样例都是先
+流程、单位换算和状态行。它不是这五个样例之一——另外四个都 import 它，所以每个样例都是先
 `from _common import ...` 再 import `litegrip_pybullet`。

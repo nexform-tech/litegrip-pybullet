@@ -1,22 +1,23 @@
 # LiteGrip PyBullet examples
 
-Three runnable programs that show the same gripper model from three directions:
-simulation only, simulation driving the hardware, and hardware driving the
-simulation.
+Five runnable programs that build on one another: read the model, move it, grasp
+with it, then couple the simulation to real hardware in both directions.
 
 **English** · [简体中文](README.zh-CN.md)
 
 | File | Direction | Hardware needed? |
 | --- | --- | --- |
-| [`01_sim_only.py`](01_sim_only.py) | — (pure PyBullet) | **No** |
-| [`02_sim_to_real.py`](02_sim_to_real.py) | simulation → gripper | Yes, to actually move |
-| [`03_real_to_sim.py`](03_real_to_sim.py) | gripper → simulation | Yes, to actually mirror |
+| [`01_hello_sim.py`](01_hello_sim.py) | reads the state, moves nothing | **No** |
+| [`02_move_sim.py`](02_move_sim.py) | simulation only | **No** |
+| [`03_grasp.py`](03_grasp.py) | simulation only | **No** |
+| [`04_mirror_real.py`](04_mirror_real.py) | gripper → simulation | Yes, to actually mirror |
+| [`05_dual_control.py`](05_dual_control.py) | simulation → gripper | Yes, to actually move |
 
 ## Prerequisites
 
 ```bash
 python3 -m pip install pybullet          # examples 01–03
-python3 -m pip install -e /path/to/lite-grip   # examples 02–03 (hardware)
+python3 -m pip install -e /path/to/lite-grip   # examples 04–05 (hardware)
 ```
 
 The `litegrip` SDK is **not on PyPI**: `pip install litegrip` installs something
@@ -28,7 +29,7 @@ directory next to this repository, or:
 export LITEGRIP_SDK_DIR=/path/to/lite-grip
 ```
 
-Missing either of the last two, 02 and 03 stop at startup and name the SDK
+Missing either of the last two, 04 and 05 stop at startup and name the SDK
 members they need (`LiteGrip.refresh_status`, `GripperState.data_age_s` /
 `has_data` / `is_stale`) instead of failing somewhere inside the control loop.
 
@@ -36,14 +37,14 @@ If `pybullet` is missing, the examples re-exec themselves into `./.venv/bin/pyth
 when that exists. Nothing else is required: the URDF and its meshes are bundled
 under `src/litegrip_pybullet/assets/litegrip_urdf/`, so a fresh clone runs as-is.
 
-Bring up CAN before running 02 or 03:
+Bring up CAN before running 04 or 05:
 
 ```bash
 sudo ip link set can0 up type can bitrate 1000000
 ip -details link show can0
 ```
 
-> **Examples 02 and 03 move real hardware.** Read
+> **Examples 04 and 05 move real hardware.** Read
 > [Before you drive the hardware](#before-you-drive-the-hardware) first.
 
 ## One opening, three notations
@@ -70,34 +71,133 @@ at calibration time from a stroke length the loader never writes back, so the tw
 can disagree; when they do, `position_mm / max_stroke_mm` saturates partway and
 the top of the slider does nothing. See `_common.fraction_to_target_rad`.
 
-## The examples
+## The five examples
 
-### 01 — simulation only
+### 01 — hello, simulation
 
-No hardware, no CAN, no SDK. A four-part walkthrough of the model:
+Reads the model and moves nothing. No hardware, no CAN, no SDK — and no motion
+call anywhere in the file: `sim.step()` only pumps the window's events and
+advances the clock, so the jaws stay where they are however long you leave it.
+
+1. **The model constants** — the finger count, the per-finger stroke, the jaw
+   opening the bundled URDF actually has and the force cap in force.
+2. **The current opening, in three notations** — the normalised fraction, the
+   jaw gap in millimetres and the SDK's calibrated millimetres, side by side.
+3. **A live status line** — with a window open it refreshes until you press
+   **Esc** or **Q**.
+
+```bash
+python3 examples/01_hello_sim.py                # window, full demo
+python3 examples/01_hello_sim.py --headless     # no window, exits 0
+```
+
+Read-only is checked, not promised: `tests/test_examples_cli.py` parses this file
+and refuses it any motion call (`command_fraction`, `command_joint`,
+`reset_fraction`, `settle`, `run_for`, `add_box`), and separately asserts its
+output never claims a motion happened.
+
+### 02 — moving, in simulation
+
+The same gripper, now driven, still with nothing but PyBullet:
 
 1. **Speed-limited travel** — a full stroke takes ~1 s, because the ramp is
    limited to 85 mm/s, the hardware's rated speed. The fingers close on each
    other, so the *gap* changes at twice that.
 2. **Midpoint positioning** — command a normalised opening, and `settle()` waits
    for the jaws to actually arrive.
-3. **Grasping** — drop a box between the fingers, close at a force cap, and read
-   back the contact points and the motor force. `settle()` returning `False` here
-   is the correct answer, not a failure: the fingers are blocked by the part.
-4. **Pulling** — add a downward force and find the friction limit. It holds 5 N
-   and slips at 15 N.
 
 ```bash
-python3 examples/01_sim_only.py                 # window, full demo
-python3 examples/01_sim_only.py --headless      # no window, exits 0
-python3 examples/01_sim_only.py --object-mm 60 --force 20
-python3 examples/01_sim_only.py --slip 40       # a pull that definitely slips
+python3 examples/02_move_sim.py                 # window, full demo
+python3 examples/02_move_sim.py --headless      # no window, exits 0
+python3 examples/02_move_sim.py --speed 0.02    # slow: ~2 s for a full stroke
+python3 examples/02_move_sim.py --force 20      # 20 N grip cap
 ```
 
-The grip in step 3 is real friction, not a ledge: the part is held in mid-air and
+**Do not** reach for `--object-mm`, `--hold`, `--pull` or `--slip` here: this
+example has no part to grasp or pull on, and argparse rejects those flags with
+exit 2 rather than ignoring them. They belong to 03.
+
+### 03 — grasping, in simulation
+
+A box between the fingers, a force cap, and a downward pull:
+
+1. **Grasping** — drop a 40 mm box at the grasp centre, close at a force cap and
+   read back the contact points and the motor force. `settle()` returning `False`
+   here is the correct answer, not a failure: the fingers are blocked by the part.
+2. **Pulling** — add a downward force and find the friction limit. It holds 5 N
+   and slips at 15 N.
+3. **Releasing** — open the jaws and the part drops onto the base: a grip that is
+   friction and nothing else goes away the moment the fingers open.
+
+```bash
+python3 examples/03_grasp.py                    # window, full demo
+python3 examples/03_grasp.py --headless         # no window, exits 0
+python3 examples/03_grasp.py --object-mm 60 --force 20
+python3 examples/03_grasp.py --slip 40          # a pull that definitely slips
+```
+
+The grip in step 1 is real friction, not a ledge: the part is held in mid-air and
 *touches only the two fingers*. See [Notes](#notes) for how that is arranged.
 
-### 02 — simulation drives the gripper
+### 04 — the gripper drives the simulation
+
+The hardware is the source of truth; the simulation is a display. Each frame
+reads the hardware position once and teleports the simulated fingers onto it with
+`reset_fraction()` — pure kinematics, no dynamics — so the window shows where the
+hardware is right now, with no lag and no drift of its own.
+
+Two ways to use it:
+
+- **Push it by hand** (`--zero-gravity`, recommended): the motor goes slack and
+  you can move the fingers yourself. The window follows your hand. Press **Z**
+  while running to toggle slack/enabled.
+- **Watch another program drive it** (`--passive`): this example connects, reads,
+  and leaves the feeding to that program — it does not enable the motor and sends
+  nothing at all.
+
+```bash
+python3 examples/04_mirror_real.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/04_mirror_real.py                  # mirror (hold frames keep it alive)
+python3 examples/04_mirror_real.py --passive        # read only, let someone else feed it
+python3 examples/04_mirror_real.py --headless       # terminal readings only
+python3 examples/04_mirror_real.py --duration 10    # stop after 10 s
+```
+
+Like 05, this needs a calibration file on every run — see
+[Before you drive the hardware](#before-you-drive-the-hardware).
+
+#### Why "just watching" still has to send frames
+
+An **enabled** motor that hears nothing for about **0.9 s** latches the
+communication-loss fault (0xD) — again a blinking red LED, positions that still
+read, and commands that are silently ignored. The SDK measured that 0.9 s on this
+hardware; the `TIMEOUT` register (RID 9) disagrees with it (8000 ms on one read,
+0 on another) and is marked unresolved, so the timing here follows the
+measurement. Watching the PyBullet window without feeding it is enough to wedge
+the gripper.
+
+So the default mode is not read-only: it sends "**locked at the measured
+position**" hold frames at 200 Hz — target where the fingers already are, zero
+velocity, zero feed-forward. It commands no motion; it just gives the fingers
+stiffness and keeps the watchdog fed. To back-drive it instead, add
+`--zero-gravity` (or press Z), which streams the same way with kp/kd zeroed.
+
+Use `--passive` when a **different program** is driving the hardware: this example
+then sends no frames, does not enable the motor, and disables the Z key, so the
+two never fight over the bus. The cost is that the other program has to feed the
+motor itself, or it latches 0xD about 0.9 s later anyway. **Do not combine
+`--passive` with running this example alone.**
+
+`--zero-gravity` (or Z) makes the gripper *soft*, so the fingers can be
+back-driven and can also sag under gravity. Support the gripper before enabling
+it.
+
+Quitting **disables** the motor (0xFD) rather than sending one last relock frame:
+a single frame has nothing after it, so an enabled motor goes quiet and latches
+0xD within the second — with nobody left to clear it. The gripper therefore goes
+limp on exit and the fingers may drift under their own weight.
+
+### 05 — simulation drives the gripper
 
 The window is two things at once: three sliders that *command* the hardware, and
 a mirror that *shows* where the hardware is. Enabling the motor does not move
@@ -130,10 +230,10 @@ latches a communication-loss fault (0xD), so standing still is the thing that
 fails.
 
 ```bash
-python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
-python3 examples/02_sim_to_real.py --dry-run         # window only, never touches CAN
-python3 examples/02_sim_to_real.py --speed 40        # start the speed slider at 40 %
-python3 examples/02_sim_to_real.py --force 20 --channel can1
+python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/05_dual_control.py --dry-run         # window only, never touches CAN
+python3 examples/05_dual_control.py --speed 40        # start the speed slider at 40 %
+python3 examples/05_dual_control.py --force 20 --channel can1
 ```
 
 `--calib` is required on every run, `--dry-run` included; without it the example
@@ -177,7 +277,7 @@ to `0` reverses the damping term into a torque step of `kd × v`. At this machin
 `2.8 / kp = 0.56 rad` of position error at `kp = 5.0`, which is 40 % of the travel
 — more than the position loop can find, so the mechanism recoils to rebuild it.
 
-Example 02 therefore decelerates before it arrives: while the remaining distance
+Example 05 therefore decelerates before it arrives: while the remaining distance
 is short, the commanded speed is `√(2·a·remaining)` with `a = full speed / 0.15 s`
 (`RAMP_DOWN_S`). The speed is never *above* the rate limit, so the limit stays a
 hard bound; it only makes the last few frames slower, and the frame before the
@@ -192,8 +292,8 @@ appears when a script drives the gripper with the SDK directly.
 #### If a wedged gripper reads but won't move
 
 ```bash
-python3 examples/02_sim_to_real.py --status                  # read only, sends nothing
-python3 examples/02_sim_to_real.py --status --clear-fault    # clear the latched fault
+python3 examples/05_dual_control.py --status                  # read only, sends nothing
+python3 examples/05_dual_control.py --status --clear-fault    # clear the latched fault
 ```
 
 `--status` opens no window, does not enable the motor and **sends no motion
@@ -234,7 +334,7 @@ value for the record and says as much next to it:
    寄存器 TIMEOUT=0 · CTRL_MODE=1 · UV_Value=15 · OC_Value=0.8 · OT_Value=100
    ⏱  通信超时保护（TIMEOUT, RID 9）= 0（这个寄存器当前不生效）
    ⚠️  别拿这个寄存器当依据：实测**使能态**的电机静默约 0.9 s 就锁 0xD 通信丢失故障，与寄存器读数对不上（这台机器读到过 8000，也读到过 0），SDK 自己把这条标成「待查」。
-      所以 02/03 空闲时照 200 Hz 持续发帧，不赌这个数字；只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
+      所以 04/05 空闲时照 200 Hz 持续发帧，不赌这个数字；只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
 ```
 
 (Captured on this bench on 2026-09-28, motor disabled and healthy: exit 0.)
@@ -261,71 +361,13 @@ run `control_mit_stream()` internally, which sleeps in its own 5 ms loop and nev
 yields — the PyBullet window would freeze and keystrokes would go unread. The
 public frame-level API exists for exactly this case.
 
-### 03 — the gripper drives the simulation
-
-The hardware is the source of truth; the simulation is a display. Each frame
-reads the hardware position once and teleports the simulated fingers onto it with
-`reset_fraction()` — pure kinematics, no dynamics — so the window shows where the
-hardware is right now, with no lag and no drift of its own.
-
-Two ways to use it:
-
-- **Push it by hand** (`--zero-gravity`, recommended): the motor goes slack and
-  you can move the fingers yourself. The window follows your hand. Press **Z**
-  while running to toggle slack/enabled.
-- **Watch another program drive it** (`--passive`): this example connects, reads,
-  and leaves the feeding to that program — it does not enable the motor and sends
-  nothing at all.
-
-```bash
-python3 examples/03_real_to_sim.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
-python3 examples/03_real_to_sim.py                  # mirror (hold frames keep it alive)
-python3 examples/03_real_to_sim.py --passive        # read only, let someone else feed it
-python3 examples/03_real_to_sim.py --headless       # terminal readings only
-python3 examples/03_real_to_sim.py --duration 10    # stop after 10 s
-```
-
-Like 02, this needs a calibration file on every run — see
-[Before you drive the hardware](#before-you-drive-the-hardware).
-
-#### Why "just watching" still has to send frames
-
-An **enabled** motor that hears nothing for about **0.9 s** latches the
-communication-loss fault (0xD) — again a blinking red LED, positions that still
-read, and commands that are silently ignored. The SDK measured that 0.9 s on this
-hardware; the `TIMEOUT` register (RID 9) disagrees with it (8000 ms on one read,
-0 on another) and is marked unresolved, so the timing here follows the
-measurement. Watching the PyBullet window without feeding it is enough to wedge
-the gripper.
-
-So the default mode is not read-only: it sends "**locked at the measured
-position**" hold frames at 200 Hz — target where the fingers already are, zero
-velocity, zero feed-forward. It commands no motion; it just gives the fingers
-stiffness and keeps the watchdog fed. To back-drive it instead, add
-`--zero-gravity` (or press Z), which streams the same way with kp/kd zeroed.
-
-Use `--passive` when a **different program** is driving the hardware: this example
-then sends no frames, does not enable the motor, and disables the Z key, so the
-two never fight over the bus. The cost is that the other program has to feed the
-motor itself, or it latches 0xD about 0.9 s later anyway. **Do not combine
-`--passive` with running this example alone.**
-
-`--zero-gravity` (or Z) makes the gripper *soft*, so the fingers can be
-back-driven and can also sag under gravity. Support the gripper before enabling
-it.
-
-Quitting **disables** the motor (0xFD) rather than sending one last relock frame:
-a single frame has nothing after it, so an enabled motor goes quiet and latches
-0xD within the second — with nobody left to clear it. The gripper therefore goes
-limp on exit and the fingers may drift under their own weight.
-
 ## Before you drive the hardware
 
 Both hardware examples print a safety banner and are meant to be run with the
 gripper in hand or clamped to a bench, **with the travel clear**, and the power
-switch within reach. The first run of 02 should be `--dry-run`.
+switch within reach. The first run of 05 should be `--dry-run`.
 
-A first real run of 02 looks like nothing happening, and that is correct: the
+A first real run of 05 looks like nothing happening, and that is correct: the
 motor is enabled, the window shows where the gripper already is, and it stays
 there until you drag the opening slider. Keep the fingers clear the whole time —
 the motion starts on the drag, not on a keypress.
@@ -337,12 +379,12 @@ ip -details link show can0
 ```
 
 **Pick this gripper's calibration file first.** Every path that touches the
-hardware starts there — `--status`, `--dry-run` and 03's `--passive` included —
+hardware starts there — `--status`, `--dry-run` and 04's `--passive` included —
 and the default is deliberately not an option:
 
 ```bash
-python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
-python3 examples/02_sim_to_real.py            # no --calib: it lists candidates
+python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/05_dual_control.py            # no --calib: it lists candidates
 ```
 
 Without `--calib` the candidates in `~/.litegrip` are listed with their mtime and
@@ -370,7 +412,7 @@ an explanation rather than driven with meaningless angles.
 **Why the part is "held" while the jaws close.** Closing takes about a second,
 and a 40 mm part released at the grasp centre falls ~24 mm onto the gripper's base
 in that time. It would then be *resting on the base* rather than gripped by the
-fingers, and a friction test on it would measure nothing. So example 01 sets the
+fingers, and a friction test on it would measure nothing. So example 03 sets the
 part's mass to zero (PyBullet treats it as static) until the jaws have closed,
 then restores it — after which only the fingers touch it. This is a simulation
 device, not a physical effect; the same trick is used in
@@ -384,5 +426,5 @@ device, not a physical effect; the same trick is used in
 SDK discovery, the calibration choice (`choose_calibration_file`, the candidate
 listing, the "did the file actually take effect" check), the connect/enable
 sequence, the unit conversions and the status line. It is not a fourth example —
-it is imported by the other three, which is why each starts with
+it is imported by the other four, which is why each starts with
 `from _common import ...` *before* importing `litegrip_pybullet`.

@@ -664,7 +664,7 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
         if not enable:
             # 只说「不发送运动指令」：--status 走这条路（未使能），但它之后会发
             # 只读的 0xCC 询问帧把状态叫回来——那同样是 CAN 帧，说「一帧都不发」
-            # 就把话说大了。03 的 --passive 才是真的一帧不发，它自己会这么说。
+            # 就把话说大了。04 的 --passive 才是真的一帧不发，它自己会这么说。
             print("[真机] 已连接、已载入并核实标定（未使能，不发送任何运动指令）")
             return gripper
         if not gripper.enable():

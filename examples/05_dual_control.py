@@ -161,7 +161,7 @@ SLIDER_EPS = 0.05
 #: 按 ``v = √(2·a·剩余距离)`` 收尾之后，``dq`` 在最后几帧连续降到 0，那个台阶就
 #: 没有了。代价是到位晚那么几帧（默认 0.15 s 的量级）。
 #:
-#: 注意这不是 02 独有的毛病：SDK 自己的 ``_move_at_speed_rad`` 是同样的一刀切
+#: 注意这不是 05 独有的毛病：SDK 自己的 ``_move_at_speed_rad`` 是同样的一刀切
 #: （``dq = direction*speed if i < steps else 0.0``），直接调
 #: ``gripper.move_at_speed()`` 收尾也会这样。
 RAMP_DOWN_S = 0.15
