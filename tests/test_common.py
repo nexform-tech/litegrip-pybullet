@@ -580,11 +580,20 @@ class TestRadToFraction:
         gripper = _config(pos_open_rad=0.114)     # travel == 0
         assert _common.rad_to_fraction(gripper, 0.0) == 0.0
 
-    def test_a_zero_mm_scale_does_not_change_the_reading(self):
-        """``rad_to_mm`` is not part of this mapping either."""
-        assert _common.rad_to_fraction(_config(max_stroke_mm=0.0),
-                                       0.0) == \
-            _common.rad_to_fraction(_config(), 0.0)
+    def test_the_nominal_stroke_does_not_enter_the_mapping(self):
+        """Neither the SDK's default 120 nor a garbage value changes a reading.
+
+        On the old millimetre route a ``max_stroke_mm`` of 0 was a division by
+        zero and any other value scaled the answer.  Here the only two numbers
+        that matter are the two calibrated angles, so the same pose reads the
+        same however the nominal stroke is configured.
+        """
+        cfg = _config().config
+        half_travel_rad = (cfg.pos_closed_rad + cfg.pos_open_rad) / 2.0
+        for nominal in (0.0, 1.0, 120.0, 500.0):
+            assert _common.rad_to_fraction(
+                _config(max_stroke_mm=nominal), half_travel_rad
+            ) == pytest.approx(0.5)
 
     def test_the_reading_the_hardware_actually_gave(self):
         """``get_state`` on can0 reported 29.85 mm on the SDK's mm scale.
