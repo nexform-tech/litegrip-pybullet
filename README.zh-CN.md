@@ -1,7 +1,7 @@
 # litegrip-pybullet
 
 **LiteGrip 轻量机械爪系列**的 PyBullet 仿真环境——夹爪的物理模型，加上五个样例，
-从读状态一路走到把真机接进来（两个方向）。
+从读状态一路走到在真机上手教它一段动作、再放给真机和仿真两边。
 
 [English](README.md) · **简体中文**
 
@@ -23,10 +23,18 @@ python3 -m pip install -e .          # 本包
 
 夹爪模型（URDF + STL 网格）已经打包在仓库里，加载它不需要别的东西。
 
-要驱动真机的 04/05 还多需要一份 `litegrip` SDK，而它**没有发布到 PyPI**：请用检出，
-三选一——`python3 -m pip install -e /path/to/lite-grip`、把 `lite-grip` 放在本仓库
-同级目录、或者 `export LITEGRIP_SDK_DIR=/path/to/lite-grip`。一个都没有的话，这两个
-样例会在启动时列出它们需要的 SDK 接口并退出，而不是在控制循环里才炸。
+要碰真机的样例还多需要一份 `litegrip` SDK，而它**没有发布到 PyPI**：请用检出。这样的
+检出有**两份**，接口分在两边（两边的 `__version__` 都是 2.2.0，所以看能力、别看版本
+号）：
+
+| 样例 | 检出 | editable 安装 | 环境变量 |
+| --- | --- | --- | --- |
+| 04、05 | `lite-grip` | `python3 -m pip install -e /path/to/lite-grip` | `LITEGRIP_SDK_DIR` |
+| 03 | `litegrip-python` | `python3 -m pip install -e /path/to/litegrip-python` | `LITEGRIP_TRAJ_SDK_DIR` |
+
+没有自己那份时，样例会在启动时列出它需要的 SDK 接口并退出，而不是在控制循环里才炸。
+`lite-grip` 里是 `refresh_status` / `data_age_s`，`litegrip-python` 里是
+`record_start` / `play_start` / `Trajectory`。
 
 ## 快速开始
 
@@ -50,7 +58,7 @@ sim.disconnect()
 | --- | --- | --- |
 | [`examples/01_hello_sim.py`](examples/01_hello_sim.py) | 只读状态，不动 | **不需要** |
 | [`examples/02_move_sim.py`](examples/02_move_sim.py) | 只跑仿真 | **不需要** |
-| [`examples/03_grasp.py`](examples/03_grasp.py) | 只跑仿真 | **不需要** |
+| [`examples/03_trajectory.py`](examples/03_trajectory.py) | 真机录、真机+仿真一起放 | 录制和真机回放都需要 |
 | [`examples/04_mirror_real.py`](examples/04_mirror_real.py) | 真机 → 仿真 | 要真的镜像就需要 |
 | [`examples/05_dual_control.py`](examples/05_dual_control.py) | 仿真 → 真机 | 要真的动就需要 |
 
@@ -85,8 +93,10 @@ SDK 毫米和钳口间隙之间不是单位换算的关系，它们是两个不�
 | URDF/xacro 归一化 | ✅ 已验证 | `tests/test_urdf.py`：上游 ROS 2 xacro 能在 PyBullet 里加载，2 个移动副关节，网格齐全 |
 | 模型几何（行程 ↔ 开度） | ✅ 已验证 | `tests/test_model.py`，其中一条用例检查打包 xacro 的 `stroke` 默认值与 `STROKE_M` 一致 |
 | 限速运动 | ✅ 已验证 | `tests/test_sim.py`：全行程 1.00 s 斜坡 + 约 0.13 s 伺服稳定，无超调 |
-| 力上限与摩擦夹持 | ✅ 已验证 | 10 N 夹持力下扛得住 5 N，15 N 会滑；且只有手指碰到工件 |
-| 样例 01–03（纯仿真） | ✅ 已验证 | 三个都无窗口跑通、exit 0，输出内容都在 `tests/test_examples_cli.py` 里断言；01 还会被解析一遍，确认它没有任何运动调用 |
+| 力上限与摩擦夹持 | ✅ 已验证 | `tests/test_sim.py`：10 N 夹持力下扛得住 5 N，15 N 会滑；且只有手指碰到工件 |
+| 样例 01–02（纯仿真） | ✅ 已验证 | 两个都无窗口跑通、exit 0，输出内容都在 `tests/test_examples_cli.py` 里断言；01 还会被解析一遍，确认它没有任何运动调用 |
+| 样例 03 的 `--play`（离线回放） | ✅ 已验证 | 读一段 `.lgt` 推进窗口、一帧都不发：无窗口跑通、exit 0，端到端断言在 `tests/test_example03_loop.py`，另一条用真实文件跑的在 `tests/test_examples_cli.py` |
+| 样例 03 的录制与真机回放 | ⚠️ **未验证** | 两条都没在真机上跑过：它们都会让真机真的动，而带录制的这份 SDK 是同一天才落到这台机器上的。采样率、位姿换算和保持帧的逻辑由 `tests/test_example03_loop.py` 用桩 SDK 覆盖 |
 | 样例 04（真机 → 仿真） | ⚠️ **部分验证** | 只读镜像路径在 `can0` 的真实夹爪上跑过；`--zero-gravity` 和 `--passive` 没跑过 |
 | 样例 05（仿真 → 真机） | ⚠️ **部分验证** | 在 `can0` 的真实夹爪上跑过，触发了电机故障；斜坡修复有 `tests/test_example05_stream.py` 覆盖，但**修复本身还没上过真机**。改成拖动驱动之后（没有下发键、使能后先静止、速度滑条）同样只在测试里跑过；按行程归一的滑条映射和到位前的减速段也是 |
 | 样例 05 的 `--status` 诊断 | ⚠️ **部分验证** | 2026-09-28 在 `can0` 的真实夹爪上，它读到一帧新状态、位置、错误码和 DM 寄存器，全程未使能、未动电机（exit 0）；**锁死故障**的报出和清除还没在真机上试过 |
@@ -106,9 +116,9 @@ SDK 毫米和钳口间隙之间不是单位换算的关系，它们是两个不�
   空闲期本身就是故障原因**——这是「仿真控真机只能读不能控」的真正主因。这个
   0.9 s 是 SDK 在真机上量出来的；`TIMEOUT` 寄存器（RID 9）给不出它——同一台机器
   2026-09-24 读出 8000 ms、2026-09-28 读出 0 ms（当前不生效），SDK 把这条标成
-  「待查」，`--status` 只把寄存器原值打出来、不据此下结论。04 和 05 现在空闲时也
-  发保持帧（目标 = 实测位置、零前馈），04 若要让别的程序驱动可以加 `--passive`
-  一帧不发。
+  「待查」，`--status` 只把寄存器原值打出来、不据此下结论。三个真机样例现在空闲时
+  都发保持帧（目标 = 实测位置、零前馈）——03 发在它录制与回放两个相位之间的空档里；
+  04 若要让别的程序驱动，可以加 `--passive` 一帧不发。
 
 两种故障都能用 `examples/05_dual_control.py --status [--clear-fault]` 诊断和清除，
 不必移动电机。

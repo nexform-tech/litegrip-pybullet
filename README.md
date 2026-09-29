@@ -2,7 +2,8 @@
 
 PyBullet simulation environment for the **LiteGrip lightweight robotic gripper
 series** — a physical model of the gripper, plus the five examples that go from
-reading the model to driving real hardware in both directions.
+reading the model to recording a motion on real hardware and replaying it into
+both the hardware and the simulation.
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -23,11 +24,19 @@ python3 -m pip install -e .          # this package
 ```
 
 The gripper model (URDF + STL meshes) is bundled, so nothing else is needed to
-load it. To drive real hardware, examples 04 and 05 additionally need the
-`litegrip` SDK, which is **not on PyPI** — take it from a checkout, either
-`python3 -m pip install -e /path/to/lite-grip`, a `lite-grip` directory beside
-this repository, or `$LITEGRIP_SDK_DIR`. Without one of those they stop at
-startup and name the SDK members they require.
+load it. To touch real hardware the examples additionally need the `litegrip`
+SDK, which is **not on PyPI** — take it from a checkout. There are two of them,
+and the API is split across them (both report `__version__ == 2.2.0`, so read the
+capability, not the version):
+
+| Examples | Checkout | Editable install | Environment variable |
+| --- | --- | --- | --- |
+| 04, 05 | `lite-grip` | `python3 -m pip install -e /path/to/lite-grip` | `LITEGRIP_SDK_DIR` |
+| 03 | `litegrip-python` | `python3 -m pip install -e /path/to/litegrip-python` | `LITEGRIP_TRAJ_SDK_DIR` |
+
+Without its own checkout an example stops at startup and names the SDK members it
+requires. `lite-grip` carries `refresh_status` / `data_age_s`; `litegrip-python`
+carries `record_start` / `play_start` / `Trajectory`.
 
 ## Quick start
 
@@ -51,7 +60,7 @@ sim.disconnect()
 | --- | --- | --- |
 | [`examples/01_hello_sim.py`](examples/01_hello_sim.py) | reads the state, moves nothing | **No** |
 | [`examples/02_move_sim.py`](examples/02_move_sim.py) | simulation only | **No** |
-| [`examples/03_grasp.py`](examples/03_grasp.py) | simulation only | **No** |
+| [`examples/03_trajectory.py`](examples/03_trajectory.py) | records on the gripper, replays into both | Yes, to record or to replay onto it |
 | [`examples/04_mirror_real.py`](examples/04_mirror_real.py) | gripper → simulation | Yes, to actually mirror |
 | [`examples/05_dual_control.py`](examples/05_dual_control.py) | simulation → gripper | Yes, to actually move |
 
@@ -88,8 +97,10 @@ What has been verified, and what has not:
 | URDF/xacro normalisation | ✅ Verified | `tests/test_urdf.py`: the upstream ROS 2 xacro loads in PyBullet, 2 prismatic joints, meshes present |
 | Model geometry (stroke ↔ opening) | ✅ Verified | `tests/test_model.py`, including a check that the bundled xacro's `stroke` default matches `STROKE_M` |
 | Speed-limited motion | ✅ Verified | `tests/test_sim.py`: full stroke 1.00 s of ramp + ~0.13 s of servo settling, no overshoot |
-| Force cap and friction grasping | ✅ Verified | Holds 5 N against a 10 N grip, slips at 15 N; only the fingers touch the part |
-| Examples 01–03 (simulation only) | ✅ Verified | All three run headless and exit 0, with their output asserted in `tests/test_examples_cli.py`; 01 is additionally parsed and refused any motion call |
+| Force cap and friction grasping | ✅ Verified | `tests/test_sim.py`: holds 5 N against a 10 N grip, slips at 15 N; only the fingers touch the part |
+| Examples 01–02 (simulation only) | ✅ Verified | Both run headless and exit 0, with their output asserted in `tests/test_examples_cli.py`; 01 is additionally parsed and refused any motion call |
+| Example 03 `--play` (offline replay) | ✅ Verified | Reads a `.lgt`, drives the window from it, sends nothing: run headless and exit 0, asserted end to end in `tests/test_example03_loop.py` and against a real file in `tests/test_examples_cli.py` |
+| Example 03 recording and hardware replay | ⚠️ **Not verified** | Neither has been run against a gripper: each one moves real hardware, and the recording SDK landed on this machine the same day. The sample-rate, pose-conversion and hold-frame logic is covered by `tests/test_example03_loop.py` against a stand-in SDK |
 | Example 04 (hardware → simulation) | ⚠️ **Partially verified** | The read-only mirror path was run against a real gripper on `can0`; `--zero-gravity` and `--passive` were not |
 | Example 05 (simulation → hardware) | ⚠️ **Partially verified** | Run against a real gripper on `can0`, where it latched a motor fault; the ramp fix below is covered by `tests/test_example05_stream.py` but has **not** itself been run against hardware. The drag-driven interaction (no send key, an enabled-but-stationary start, the speed slider) has likewise only been exercised in tests, as have the travel-normalised slider mapping and the deceleration before arrival |
 | Example 05 `--status` diagnostics | ⚠️ **Partially verified** | On a real gripper on 2026-09-28 it read a live status frame, the position, the error code and the DM registers without enabling or moving the motor (exit 0); the reporting path for a **latched fault**, and clearing one, have not been exercised on hardware |
@@ -114,9 +125,10 @@ causes on this hardware:
   `TIMEOUT` register (RID 9) does not give that duration — it read 8000 ms on
   2026-09-24 and 0 ms (watchdog off) on 2026-09-28, and the SDK marks it
   unresolved; `--status` prints the live value without drawing a conclusion from
-  it. Both examples keep sending hold frames (target = measured position, zero
-  feed-forward) while idle regardless; 04's `--passive` opts out of that when
-  another program is driving the bus.
+  it. All three hardware examples keep sending hold frames (target = measured
+  position, zero feed-forward) while idle regardless — 03 in the gaps between its
+  recording and replay phases; 04's `--passive` opts out of that when another
+  program is driving the bus.
 
 Both faults are diagnosed and cleared without moving the motor via
 `examples/05_dual_control.py --status [--clear-fault]`.

@@ -1,7 +1,7 @@
 # LiteGrip PyBullet 样例
 
-五个可以直接跑的程序，一层层往下走：读状态、让它动、夹住东西，再把仿真和真机
-接起来（两个方向）。
+五个可以直接跑的程序，一层层往下走：读状态、让它动、手把手教它一段动作再放给
+真机和仿真，最后把仿真和真机接起来（两个方向）。
 
 [English](README.md) · **简体中文**
 
@@ -9,41 +9,53 @@
 | --- | --- | --- |
 | [`01_hello_sim.py`](01_hello_sim.py) | 只读状态，不动 | **不需要** |
 | [`02_move_sim.py`](02_move_sim.py) | 只跑仿真 | **不需要** |
-| [`03_grasp.py`](03_grasp.py) | 只跑仿真 | **不需要** |
+| [`03_trajectory.py`](03_trajectory.py) | 真机录、真机+仿真一起放 | 录制和真机回放都需要 |
 | [`04_mirror_real.py`](04_mirror_real.py) | 真机 → 仿真 | 要真的镜像就需要 |
 | [`05_dual_control.py`](05_dual_control.py) | 仿真 → 真机 | 要真的动就需要 |
 
 ## 运行前准备
 
 ```bash
-python3 -m pip install pybullet                # 01–03 都要
-python3 -m pip install -e /path/to/lite-grip   # 04–05（要接真机）
+python3 -m pip install pybullet                       # 01–02 都要
+python3 -m pip install -e /path/to/lite-grip          # 04–05
+python3 -m pip install -e /path/to/litegrip-python    # 03
 ```
 
 真机 SDK **没有发布到 PyPI**：`pip install litegrip` 装到的不是它，而已发布的版本
-里也没有带这套接口的。请用检出：可以像上面那样 editable 安装，也可以把 `lite-grip`
-仓库放在本仓库同级目录，或者：
+里也没有带这套接口的。请用检出：可以像上面那样 editable 安装，也可以把仓库放在本
+仓库同级目录，或者用环境变量：
 
-```bash
-export LITEGRIP_SDK_DIR=/path/to/lite-grip
-```
+| 样例 | 检出 | 同级目录 | 环境变量 |
+| --- | --- | --- | --- |
+| 04、05 | `lite-grip` | `../lite-grip` | `LITEGRIP_SDK_DIR` |
+| 03 | `litegrip-python` | `../litegrip-python` | `LITEGRIP_TRAJ_SDK_DIR` |
 
-后两条都没有时，04/05 会在启动时列出它们需要的 SDK 接口（`LiteGrip.refresh_status`
-与 `GripperState.data_age_s` / `has_data` / `is_stale`）并退出，而不是在控制循环里
-才炸。
+**要两份检出，是因为接口分在两边，而两边的 `__version__` 都是 2.2.0。** 看能力，
+别看版本号：
+
+| 接口 | `lite-grip` | `litegrip-python` |
+| --- | --- | --- |
+| `LiteGrip.refresh_status`、`GripperState.has_data` / `is_stale` / `data_age_s` | 有 | **没有** |
+| `LiteGrip.record_start` / `record_stop` / `play_start` / `play_stop` / `trajectory_status`、`litegrip.trajectory` | **没有** | 有 |
+
+缺自己那份检出时，样例会在启动时列出它需要的接口（04/05 是
+`LiteGrip.refresh_status` 与 `GripperState.data_age_s` / `has_data` / `is_stale`；
+03 是 `LiteGrip.record_start`、`Trajectory.load` 等）并退出，而不是在控制循环里才
+炸。**别**把 `LITEGRIP_SDK_DIR` 指向 `litegrip-python`：04 和 05 读这个变量，会拿它
+去做自己那份检查、然后拒绝启动。两个变量对应两套能力，不能互换。
 
 缺 pybullet 时，样例会自动改用 `./.venv/bin/python` 重跑（存在的话）。除此之外
 不需要别的：URDF 和网格已经打包在 `src/litegrip_pybullet/assets/litegrip_urdf/`
 里，克隆下来就能跑。
 
-04/05 之前先把 CAN 起起来：
+03/04/05 之前先把 CAN 起起来：
 
 ```bash
 sudo ip link set can0 up type can bitrate 1000000
 ip -details link show can0
 ```
 
-> **样例 04 和 05 会驱动真机。** 先读[「上真机之前」](#上真机之前)。
+> **样例 03、04、05 会驱动真机。** 先读[「上真机之前」](#上真机之前)。
 
 ## 一个开度，三种写法
 
@@ -102,26 +114,52 @@ python3 examples/02_move_sim.py --force 20      # 20 N 夹持力上限
 ```
 
 **别**在这里找 `--object-mm`、`--hold`、`--pull`、`--slip`：这个样例没有工件可夹也
-没得拽，argparse 会直接以 exit 2 拒绝这些参数，而不是当作没看见。它们是 03 的。
+没得拽，argparse 会直接以 exit 2 拒绝这些参数，而不是当作没看见。它们属于已经删掉
+的 `03_grasp.py`。
 
-### 03 —— 仿真夹取
+### 03 —— 轨迹录制与回放
 
-两指之间放个方块，按力上限收爪，然后往下拽：
+用手教夹爪一段动作，存下来，再**同时**放回真机和窗口：
 
-1. **夹持** —— 40 mm 的方块放在抓取中心，按力上限收爪，读回接触点和电机推力。这里
-   `settle()` 返回 `False` 才是对的，不是失败：手指被工件顶住了。
-2. **下拽** —— 给工件加向下的力，找摩擦力的极限。5 N 夹得住，15 N 就滑了。
-3. **松爪** —— 张开手指，方块落到夹爪底座上：只靠摩擦的夹持，手指一张开就没有了。
+1. **录制** —— 电机进零重力（力被撤掉，两个手指可以直接用手推），SDK 在后台按
+   100 Hz 采样开度。按 **Esc** / **Q** 结束，或者用 `--record 6` 让它自己停。
+   录的时候窗口跟着你的手走。
+2. **保存** —— 存到 `~/.litegrip/trajectories/` 下的 `.lgt`，文件名带样例名和时刻，
+   所以第二次录不会盖掉第一次。**不写进本仓库**：轨迹是在某台机器上量出来的数据。
+3. **回放** —— 同一段轨迹既驱动电机，也把仿真手指瞬移到真机**实测**的位置上，所以
+   窗口显示的就是夹爪正在做的事。手指停在轨迹终点，不会自己回起点。
 
 ```bash
-python3 examples/03_grasp.py                    # 开窗口，跑整套演示
-python3 examples/03_grasp.py --headless         # 无窗口，exit 0
-python3 examples/03_grasp.py --object-mm 60 --force 20
-python3 examples/03_grasp.py --slip 40          # 一定会滑的拉力
+python3 examples/03_trajectory.py --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/03_trajectory.py --record 6 --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/03_trajectory.py --play 03_hand_taught-20260929-120000
+python3 examples/03_trajectory.py --play 03_hand_taught-20260929-120000 --real
+python3 examples/03_trajectory.py --play 03_hand_taught-20260929-120000 --speed 0.5 --headless
 ```
 
-第 1 步的夹持是真的摩擦，不是「搁在台沿上」：工件悬在两指之间，而且**只碰到两根
-手指**。怎么做到的见[「说明」](#说明)。
+轨迹存的是**归一化开度**，不是角度：一台夹爪上教的动作能在另一台上放，换个标定
+文件放也还是同一个开度。不带目录的名字会在 `~/.litegrip/trajectories` 下找、自动补
+`.lgt`；带 `/` 的路径就按写的用。
+
+单独一个 `--play` 什么都不碰：不连接、不使能、一帧都不发，只是读文件、拿它推进
+窗口——这是本样例唯一不需要真机就能跑的路径（也是 CI 唯一跑得了的）。要在真机上也
+放，加 `--real`。
+
+回放下的是**位置**，不是力。录到的力矩只作为诊断留在文件里，回放从不前馈它，所以
+「当时夹着工件录的力」放出来变成一条位置轨迹、用当时的 `kp` 去压——教出来的夹持力
+**不会**被复现。要可重复的夹持力，就先放轨迹、再调 SDK 的 `grasp(force_n=...)`。
+
+#### 相位之间由本样例自己喂帧
+
+`record_stop()` 会把电机恢复成正常闭环，然后就撒手了：之前只有 SDK 的录制器在流帧，
+而回放还没开始。**使能态**的电机静默就锁通信丢失故障（0xD），见
+[「只是看」为什么也得持续发帧](#为什么只是看也得持续发帧)。所以本样例在每个空档里按
+200 Hz 发「**锁在实测位置**」的保持帧：`enable()` 之后、录制完到回放开始之间、回放
+结束之后到你退出。它不命令任何运动，目标就是电机自己报的位置，零前馈。
+
+**别**在录制或回放进行中自己往总线上插帧。那两种会话都是 SDK 的后台线程在流总线，
+同一条线上再来一路流，轨迹就被打散了。所以本样例的保持帧只在相位之间发，绝不进入
+相位内部。
 
 ### 04 —— 真机控制仿真
 
@@ -278,11 +316,13 @@ python3 examples/05_dual_control.py --status --clear-fault    # 清掉锁死的�
    TIMEOUT=0 · CTRL_MODE=1 · UV_Value=15 · OC_Value=0.8 · OT_Value=100
    通信超时保护（TIMEOUT, RID 9）= 0（这个寄存器当前不生效）
    别拿这个寄存器当依据：实测**使能态**的电机静默约 0.9 s 就锁 0xD 通信丢失故障，与寄存器读数对不上（这台机器读到过 8000，也读到过 0），SDK 自己把这条标成「待查」。
-      所以 04/05 空闲时照 200 Hz 持续发帧，不赌这个数字；只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
+      所以 03/04/05 空闲时照 200 Hz 持续发帧，不赌这个数字；只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
 ```
 
-（2026-09-28 在本机采的，电机未使能、无故障，退出码 0。）样例两种情况都照发帧：
-换一颗电机、或者有人改过这个寄存器，都不改变它们依赖的时序。
+（2026-09-28 在本机采的，电机未使能、无故障，退出码 0。有一句后来改过：最后一行原本
+写的是 `04/05`，03 也有了同一套保持帧之后改成 `03/04/05`。其余都是那次运行自己的
+输出。）样例两种情况都照发帧：换一颗电机、或者有人改过这个寄存器，都不改变它们依赖的
+时序。
 
 同一根总线上还有**第二个主设备**时症状会更乱：两边的帧互相打架、谁也控制不了。
 跑真机样例之前先确认没有别的程序（比如 `litegrip_console --backend real`）在同一
@@ -303,12 +343,18 @@ ip -details -statistics link show can0      # 总线忙不忙：要没人跑时�
 
 ## 上真机之前
 
-两个真机样例都会先打印安全横幅，使用姿势是：夹爪拿在手上或固定在台面上，
+三个真机样例都会先打印安全横幅，使用姿势是：夹爪拿在手上或固定在台面上，
 **行程内不放任何东西**，电源开关触手可及。05 的第一次跑应当是 `--dry-run`。
 
 05 第一次真机跑看起来会像「什么都没发生」，这是对的：电机已使能、窗口显示的是夹爪
 **现在**的位置，你不拖开度滑条它就一直待在原地。全程手别伸进行程里——动起来是在你拖动
 的那一刻，不是按某个键的那一刻。
+
+**03 的手该放在哪，两个阶段正好相反。** 录制时电机失力、手就按在手指上，夹不到人；
+那里的风险是你把手指推到了它去不了的地方，或者还没握住它录制就开始了。回放相反：
+电机是正常闭环，按标定里的 `kp`、`kd` 跟着轨迹走。回放期间手离开行程，而且记住手指
+**停在轨迹终点、带着力**，直到你退出或样例被停掉。**别**在不知情的人面前回放：没有
+确认步骤，窗口和真机是同时动的。
 
 动之前先确认 CAN 接口：
 
@@ -340,16 +386,18 @@ SDK 的 `load_calibration` 在路径读不出来时会**静默改用打包的出
 
 ## 说明
 
-**为什么合爪的时候要「扶住」工件。** 合爪大约要 1 s，而一个 40 mm 的工件放在抓取
-中心后，这 1 s 里会自由落体约 24 mm 掉到夹爪底座上。那之后它就是**坐在底座上**，
-不是被手指夹住的，对它做摩擦测试什么也测不出来。所以样例 03 在合爪期间把工件的
-质量设为 0（PyBullet 会把它当静态体），合上之后再恢复——此后就只有手指碰得到它。
-这是仿真里的技巧，不是物理现象；`tests/test_sim.py::close_in` 用的是同一招。
+**抓取中心在哪。** `[0.0, 0.0, 0.0665]` m——在两指中间，离底座顶面 22.5 mm。现在没有
+样例往那里放工件了；`GripperSim.grasp_center` 和那几个接触检测接口仍然是库的一部分，
+由 `tests/test_sim.py` 覆盖。`getAABB` 会把每个 link 放大约 3 mm，所以不要用它读开口，
+用 `aperture_mm()`。
 
-**抓取中心在哪。** `[0.0, 0.0, 0.0665]` m——在两指中间，离底座顶面 22.5 mm。
-`getAABB` 会把每个 link 放大约 3 mm，所以不要用它读开口，用 `aperture_mm()`。
+**共用的部分。** [`_common.py`](_common.py) 放着参数解析、**两份** SDK 查找（04/05 用的
+新鲜度那份，和 03 用的轨迹那份）、标定选择（`choose_calibration_file`、候选列表、
+「这份文件到底生效了没有」的核实）、连接/使能流程、单位换算和状态行。它不是这五个样例
+之一——另外四个都 import 它，所以每个样例都是先 `from _common import ...` 再 import
+`litegrip_pybullet`。
 
-**共用的部分。** [`_common.py`](_common.py) 放着参数解析、SDK 查找、标定选择
-（`choose_calibration_file`、候选列表、「这份文件到底生效了没有」的核实）、连接/使能
-流程、单位换算和状态行。它不是这五个样例之一——另外四个都 import 它，所以每个样例都是先
-`from _common import ...` 再 import `litegrip_pybullet`。
+**03 不复用 `open_real_gripper`。** 那个函数在连接之前会跑 `check_sdk_api`——查的是
+**新鲜度**那套接口，而轨迹那份 SDK 没有它们。所以 03 是拿 `_common` 导出的那些步骤自己
+串了一遍「选标定 → 连接 → 载入并核实标定 → 使能」，只去掉那一个检查。哪天两份 SDK
+合成一份，这段和 `trajectory_sdk_dir()` 都可以删掉。

@@ -1,7 +1,8 @@
 # LiteGrip PyBullet examples
 
-Five runnable programs that build on one another: read the model, move it, grasp
-with it, then couple the simulation to real hardware in both directions.
+Five runnable programs that build on one another: read the model, move it in
+simulation, teach the gripper a motion by hand and replay it into both, then
+couple the two in each direction.
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -9,42 +10,56 @@ with it, then couple the simulation to real hardware in both directions.
 | --- | --- | --- |
 | [`01_hello_sim.py`](01_hello_sim.py) | reads the state, moves nothing | **No** |
 | [`02_move_sim.py`](02_move_sim.py) | simulation only | **No** |
-| [`03_grasp.py`](03_grasp.py) | simulation only | **No** |
+| [`03_trajectory.py`](03_trajectory.py) | records on the gripper, replays into both | Yes, to record or to replay onto it |
 | [`04_mirror_real.py`](04_mirror_real.py) | gripper → simulation | Yes, to actually mirror |
 | [`05_dual_control.py`](05_dual_control.py) | simulation → gripper | Yes, to actually move |
 
 ## Prerequisites
 
 ```bash
-python3 -m pip install pybullet          # examples 01–03
-python3 -m pip install -e /path/to/lite-grip   # examples 04–05 (hardware)
+python3 -m pip install pybullet                       # examples 01–02
+python3 -m pip install -e /path/to/lite-grip          # examples 04–05
+python3 -m pip install -e /path/to/litegrip-python    # example 03
 ```
 
 The `litegrip` SDK is **not on PyPI**: `pip install litegrip` installs something
 else, and no released version carries the API these examples use. Take it from a
-checkout — either an editable install as above, or a sibling `lite-grip`
-directory next to this repository, or:
+checkout — either an editable install as above, or a sibling directory next to
+this repository, or an environment variable:
 
-```bash
-export LITEGRIP_SDK_DIR=/path/to/lite-grip
-```
+| Examples | Checkout | Sibling directory | Environment variable |
+| --- | --- | --- | --- |
+| 04, 05 | `lite-grip` | `../lite-grip` | `LITEGRIP_SDK_DIR` |
+| 03 | `litegrip-python` | `../litegrip-python` | `LITEGRIP_TRAJ_SDK_DIR` |
 
-Missing either of the last two, 04 and 05 stop at startup and name the SDK
-members they need (`LiteGrip.refresh_status`, `GripperState.data_age_s` /
-`has_data` / `is_stale`) instead of failing somewhere inside the control loop.
+**Two checkouts, because the API is split across them and both report
+`__version__ == 2.2.0`.** Read the capability, not the version number:
+
+| API | `lite-grip` | `litegrip-python` |
+| --- | --- | --- |
+| `LiteGrip.refresh_status`, `GripperState.has_data` / `is_stale` / `data_age_s` | yes | **no** |
+| `LiteGrip.record_start` / `record_stop` / `play_start` / `play_stop` / `trajectory_status`, `litegrip.trajectory` | **no** | yes |
+
+Missing its own checkout, each example stops at startup and names the members it
+needs (`LiteGrip.refresh_status`, `GripperState.data_age_s` / `has_data` /
+`is_stale` for 04/05; `LiteGrip.record_start`, `Trajectory.load` and the rest for
+03) instead of failing somewhere inside a control loop. **Do not** point
+`LITEGRIP_SDK_DIR` at `litegrip-python`: 04 and 05 read it, fail their own check
+against it and refuse to start. The two variables name two capabilities and are
+not interchangeable.
 
 If `pybullet` is missing, the examples re-exec themselves into `./.venv/bin/python`
 when that exists. Nothing else is required: the URDF and its meshes are bundled
 under `src/litegrip_pybullet/assets/litegrip_urdf/`, so a fresh clone runs as-is.
 
-Bring up CAN before running 04 or 05:
+Bring up CAN before running 03, 04 or 05:
 
 ```bash
 sudo ip link set can0 up type can bitrate 1000000
 ip -details link show can0
 ```
 
-> **Examples 04 and 05 move real hardware.** Read
+> **Examples 03, 04 and 05 move real hardware.** Read
 > [Before you drive the hardware](#before-you-drive-the-hardware) first.
 
 ## One opening, three notations
@@ -115,29 +130,68 @@ python3 examples/02_move_sim.py --force 20      # 20 N grip cap
 
 **Do not** reach for `--object-mm`, `--hold`, `--pull` or `--slip` here: this
 example has no part to grasp or pull on, and argparse rejects those flags with
-exit 2 rather than ignoring them. They belong to 03.
+exit 2 rather than ignoring them. They belonged to the old `03_grasp.py`, which
+no longer exists.
 
-### 03 — grasping, in simulation
+### 03 — recording a motion and replaying it
 
-A box between the fingers, a force cap, and a downward pull:
+Teach the gripper a motion by hand, save it, and play it back into the hardware
+**and** the window at the same time:
 
-1. **Grasping** — drop a 40 mm box at the grasp centre, close at a force cap and
-   read back the contact points and the motor force. `settle()` returning `False`
-   here is the correct answer, not a failure: the fingers are blocked by the part.
-2. **Pulling** — add a downward force and find the friction limit. It holds 5 N
-   and slips at 15 N.
-3. **Releasing** — open the jaws and the part drops onto the base: a grip that is
-   friction and nothing else goes away the moment the fingers open.
+1. **Record.** The motor drops into zero gravity — its force is switched off and
+   you push the fingers through the motion yourself — while the SDK samples the
+   opening at 100 Hz in the background. Press **Esc** / **Q** to stop, or pass
+   `--record 6` to stop by itself. The window follows your hand as you go.
+2. **Save.** The recording goes to `~/.litegrip/trajectories/` as a `.lgt` named
+   after the example and the time, so a second recording cannot overwrite the
+   first. Nothing is written into this repository: a trajectory is data measured
+   on one machine.
+3. **Replay.** The same trajectory drives the motor and teleports the simulated
+   fingers onto its **measured** position, so what the window shows is what the
+   gripper is doing. The fingers stop where the trajectory ends and do not return
+   to the start by themselves.
 
 ```bash
-python3 examples/03_grasp.py                    # window, full demo
-python3 examples/03_grasp.py --headless         # no window, exits 0
-python3 examples/03_grasp.py --object-mm 60 --force 20
-python3 examples/03_grasp.py --slip 40          # a pull that definitely slips
+python3 examples/03_trajectory.py --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/03_trajectory.py --record 6 --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/03_trajectory.py --play 03_hand_taught-20260929-120000
+python3 examples/03_trajectory.py --play 03_hand_taught-20260929-120000 --real
+python3 examples/03_trajectory.py --play 03_hand_taught-20260929-120000 --speed 0.5 --headless
 ```
 
-The grip in step 1 is real friction, not a ledge: the part is held in mid-air and
-*touches only the two fingers*. See [Notes](#notes) for how that is arranged.
+The trajectory stores the **normalised opening**, not an angle, so a motion
+taught on one gripper replays on another, and the file replayed through a
+different machine's calibration still means the same opening. A bare name is
+resolved inside `~/.litegrip/trajectories` with `.lgt` appended; a path with a `/`
+in it is used as written.
+
+`--play` on its own touches nothing: no connection, no enable, no frame. It reads
+the file and drives the window from it, which is the one path this example has
+that runs without a gripper (and the only one CI can run). Add `--real` to send
+the same trajectory to the hardware as well.
+
+Replay commands **position**, not force. The recorded torque is kept in the file
+as a diagnostic and is never fed forward, so a squeeze that was recorded against
+a part replays as a position path that presses with whatever `kp` yields — the
+grip force you taught is not preserved. For a repeatable grip, replay the motion
+and then call the SDK's `grasp(force_n=...)`.
+
+#### Between the phases, this example feeds the motor itself
+
+`record_stop()` puts the motor back under closed-loop control and then stops: the
+SDK's recorder was the only thing streaming frames, and the replay has not started
+yet. An enabled motor that hears nothing latches the communication-loss fault
+(0xD) — see [Why "just watching" still has to send
+frames](#why-just-watching-still-has-to-send-frames). So this example streams
+"**locked at the measured position**" hold frames at 200 Hz through every gap:
+after `enable()`, between the recording and the replay, and after the replay ends
+until you quit. It commands no motion; the target *is* the position the motor
+reports, with zero feed-forward.
+
+**Do not** stream frames of your own while a recording or a replay is running.
+Both are SDK background threads streaming the bus, and a second stream on the same
+wire tears the trajectory apart. The example's hold frames are therefore strictly
+between phases, never inside one.
 
 ### 04 — the gripper drives the simulation
 
@@ -335,10 +389,12 @@ value for the record and says as much next to it:
    TIMEOUT=0 · CTRL_MODE=1 · UV_Value=15 · OC_Value=0.8 · OT_Value=100
    通信超时保护（TIMEOUT, RID 9）= 0（这个寄存器当前不生效）
    别拿这个寄存器当依据：实测**使能态**的电机静默约 0.9 s 就锁 0xD 通信丢失故障，与寄存器读数对不上（这台机器读到过 8000，也读到过 0），SDK 自己把这条标成「待查」。
-      所以 04/05 空闲时照 200 Hz 持续发帧，不赌这个数字；只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
+      所以 03/04/05 空闲时照 200 Hz 持续发帧，不赌这个数字；只读不喂帧（或跑了别的只读脚本）同样会把它看哑。
 ```
 
-(Captured on this bench on 2026-09-28, motor disabled and healthy: exit 0.)
+(Captured on this bench on 2026-09-28, motor disabled and healthy: exit 0. One
+phrase has since changed: that last line listed `04/05` until 03 gained the same
+hold frames. Everything else is the run's own text.)
 
 The examples keep feeding either way — a different motor, or someone editing that
 register, changes nothing about the timings these examples rely on.
@@ -364,7 +420,7 @@ public frame-level API exists for exactly this case.
 
 ## Before you drive the hardware
 
-Both hardware examples print a safety banner and are meant to be run with the
+All three hardware examples print a safety banner and are meant to be run with the
 gripper in hand or clamped to a bench, **with the travel clear**, and the power
 switch within reach. The first run of 05 should be `--dry-run`.
 
@@ -372,6 +428,17 @@ A first real run of 05 looks like nothing happening, and that is correct: the
 motor is enabled, the window shows where the gripper already is, and it stays
 there until you drag the opening slider. Keep the fingers clear the whole time —
 the motion starts on the drag, not on a keypress.
+
+**Only run 03 with your hands where they should be.** Recording means the motor's
+force is off and your hand is on the fingers, so nothing can pinch you — the risk
+there is that you push the fingers somewhere they cannot go, or that the recording
+starts before you are holding it. Replay is the opposite: the motor is under
+closed-loop control and follows the trajectory at whatever `kp` and `kd` the
+calibration carries. Keep clear of the travel during the replay, and remember that
+the fingers stay at the end of the trajectory, at force, until you quit or the
+example is stopped. **Do not** run a replay in front of someone who is not
+expecting the gripper to move: there is no confirmation step, and the window shows
+the motion at the same time as the hardware does it.
 
 Confirm the CAN interface before anything moves:
 
@@ -410,22 +477,22 @@ an explanation rather than driven with meaningless angles.
 
 ## Notes
 
-**Why the part is "held" while the jaws close.** Closing takes about a second,
-and a 40 mm part released at the grasp centre falls ~24 mm onto the gripper's base
-in that time. It would then be *resting on the base* rather than gripped by the
-fingers, and a friction test on it would measure nothing. So example 03 sets the
-part's mass to zero (PyBullet treats it as static) until the jaws have closed,
-then restores it — after which only the fingers touch it. This is a simulation
-device, not a physical effect; the same trick is used in
-`tests/test_sim.py::close_in`.
-
 **Where the grasp centre is.** `[0.0, 0.0, 0.0665]` m — between the finger faces,
-22.5 mm clear of the base's top surface. `getAABB` inflates each link by roughly
-3 mm, so never read the jaw opening from it; use `aperture_mm()`.
+22.5 mm clear of the base's top surface. No example puts a part there any more;
+`GripperSim.grasp_center` and the contact helpers are still part of the library and
+covered by `tests/test_sim.py`. `getAABB` inflates each link by roughly 3 mm, so
+never read the jaw opening from it; use `aperture_mm()`.
 
-**Shared helpers.** [`_common.py`](_common.py) holds the argument parsers, the
-SDK discovery, the calibration choice (`choose_calibration_file`, the candidate
-listing, the "did the file actually take effect" check), the connect/enable
-sequence, the unit conversions and the status line. It is not a fourth example —
-it is imported by the other four, which is why each starts with
-`from _common import ...` *before* importing `litegrip_pybullet`.
+**Shared helpers.** [`_common.py`](_common.py) holds the argument parsers, the two
+SDK discoveries (the freshness one for 04/05 and the trajectory one for 03), the
+calibration choice (`choose_calibration_file`, the candidate listing, the "did the
+file actually take effect" check), the connect/enable sequence, the unit
+conversions and the status line. It is not a fourth example — it is imported by the
+other four, which is why each starts with `from _common import ...` *before*
+importing `litegrip_pybullet`.
+
+**03 does not use `open_real_gripper`.** That helper runs `check_sdk_api` before it
+connects — the check for the *freshness* API, which the trajectory checkout does
+not have. 03 therefore repeats the connect/enable/calibrate sequence against the
+steps `_common` exports, minus that one check. If the two SDKs are ever merged
+into one checkout, this and `trajectory_sdk_dir()` both disappear.
