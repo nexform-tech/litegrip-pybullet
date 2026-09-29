@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""样例 02 · 仿真控制真机：拖滑条，真机跟着走
+"""样例 05 · 仿真控制真机：拖滑条，真机跟着走
 
 方向是 **仿真 → 真机**：滑条是手里的操纵杆，真机跟着它动。
 
@@ -23,7 +23,7 @@
 就会发指令，所以别把手放在滑条上，也别在真机动的时候去点窗口。第一次跑务必先
 dry-run：
 
-    python3 examples/02_sim_to_real.py --dry-run    # 只开窗口，绝不碰 CAN
+    python3 examples/05_dual_control.py --dry-run    # 只开窗口，绝不碰 CAN
 
 ⚠️ **每次都要先选定这台夹爪的标定文件**（标定文件由上位机标定后保存得到：
 
@@ -37,15 +37,15 @@ dry-run：
 
 真机跑：
 
-    python3 examples/02_sim_to_real.py --calib ~/.litegrip/litegrip_calibration.json
-    python3 examples/02_sim_to_real.py                # 不给就当场从候选里选
-    python3 examples/02_sim_to_real.py --force 20 --speed 40
-    python3 examples/02_sim_to_real.py --channel can1        # 换 CAN 口
+    python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
+    python3 examples/05_dual_control.py                # 不给就当场从候选里选
+    python3 examples/05_dual_control.py --force 20 --speed 40
+    python3 examples/05_dual_control.py --channel can1        # 换 CAN 口
 
 **真机「能读不能控」怎么办**（位置读得到、发指令不动、驱动板红灯闪）：
 
-    python3 examples/02_sim_to_real.py --status             # 只连、只读，不发一帧
-    python3 examples/02_sim_to_real.py --status --clear-fault   # 清掉锁死的故障
+    python3 examples/05_dual_control.py --status             # 只连、只读，不发一帧
+    python3 examples/05_dual_control.py --status --clear-fault   # 清掉锁死的故障
 
 红灯闪 + 位置照读 + 指令无效，是电机进了**锁死**的故障态，而 ``--status`` 打的
 那个错误码就是它的名字（0xD = 通信丢失、0x9 = 欠压、0xA = 过流、0xB/0xC = 过温
@@ -114,7 +114,7 @@ NOMINAL_N_TO_NM = 0.1
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="样例 02 · 仿真控制真机：拖滑条，真机跟着走",
+        description="样例 05 · 仿真控制真机：拖滑条，真机跟着走",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     add_common_args(ap)
@@ -596,7 +596,7 @@ def run_status(args: argparse.Namespace) -> int:
     if args.headless:
         raise SystemExit("❌ --status 本来就不开窗口，不用加 --headless。")
 
-    print("样例 02 · --status：只连接、只读，不动电机")
+    print("样例 05 · --status：只连接、只读，不动电机")
     gripper = open_real_gripper(args, enable=False)
     cleared = 0
     try:
@@ -645,7 +645,7 @@ def run_status(args: argparse.Namespace) -> int:
                   f"{MEASURED_COMM_LOSS_S:g} s 就锁 0xD 通信丢失故障，与寄存器读数"
                   "对不上（这台机器读到过 8000，也读到过 0），SDK 自己把这条标成"
                   "「待查」。")
-            print("      所以 02/03 空闲时照 200 Hz 持续发帧，不赌这个数字；只读"
+            print("      所以 04/05 空闲时照 200 Hz 持续发帧，不赌这个数字；只读"
                   "不喂帧（或跑了别的只读脚本）同样会把它看哑。")
 
         if not state.is_error:
@@ -657,7 +657,7 @@ def run_status(args: argparse.Namespace) -> int:
         print("      位置照样能读、但任何指令都不会被执行（这就是「能读不能控」）。")
         if not args.clear_fault:
             print("\n   要清掉它，加 --clear-fault 再跑一次：\n"
-                  "       python3 examples/02_sim_to_real.py --status --clear-fault\n"
+                  "       python3 examples/05_dual_control.py --status --clear-fault\n"
                   "   （只发零力矩帧，不命令运动；但清除流程会 disable→enable，\n"
                   "    那一瞬间电机失力，手指可能因自重滑动——先托住夹爪。）")
             return 1
@@ -689,19 +689,19 @@ def main() -> int:
     args = parse_args()
     if args.clear_fault and not args.status:
         raise SystemExit("❌ --clear-fault 要配合 --status 用（它只清故障，不驱动）：\n"
-                         "   python3 examples/02_sim_to_real.py --status --clear-fault")
+                         "   python3 examples/05_dual_control.py --status --clear-fault")
     if args.status:
         return run_status(args)
     if args.headless:
         raise SystemExit(
-            "❌ 样例 02 靠窗口里的滑条来设目标，没有窗口就没法操作。\n"
+            "❌ 样例 05 靠窗口里的滑条来设目标，没有窗口就没法操作。\n"
             "   想看无窗口的纯仿真请用 examples/01_sim_only.py；\n"
-            "   想看真机 → 仿真（不需要操作）请用 examples/03_real_to_sim.py。"
+            "   想看真机 → 仿真（不需要操作）请用 examples/04_mirror_real.py。"
         )
 
     force_n = max(0.0, min(MAX_GRIP_FORCE_N, args.force))
     if args.dry_run:
-        print("样例 02 · 仿真控制真机（--dry-run：不碰真机，只走流程）")
+        print("样例 05 · 仿真控制真机（--dry-run：不碰真机，只走流程）")
         # dry-run 也要先选标定：它走的正是这套参数（目标角、毫米刻度都由标定
         # 决定）。只读文件、不导入 SDK、不建 CAN 对象——所以这里用纯值版的自洽
         # 检查，SDK 那边的 config 此刻不存在。
@@ -720,7 +720,7 @@ def main() -> int:
         n_to_nm = NOMINAL_N_TO_NM
     else:
         print(SAFETY_BANNER)
-        print("\n样例 02 · 仿真控制真机")
+        print("\n样例 05 · 仿真控制真机")
         gripper = open_real_gripper(args)
         live = True
         n_to_nm = import_litegrip().UnitConversion.N_TO_NM
@@ -798,7 +798,7 @@ def main() -> int:
                     # 窗口留着不关，好让人把上面这些字读完。
                     print(f"\n❌ 真机报故障：{fault}")
                     print("   已停止发帧。清故障（不动电机）："
-                          "examples/02_sim_to_real.py --status --clear-fault")
+                          "examples/05_dual_control.py --status --clear-fault")
                     drive = None
                     faulted = True
 
@@ -827,7 +827,7 @@ def main() -> int:
                             print("   限速要按「现在」的位置算，拿旧读数算出来的"
                                   "是一条阶跃指令，电机接不住。")
                             print("   先看真机怎么了："
-                                  "python3 examples/02_sim_to_real.py --status")
+                                  "python3 examples/05_dual_control.py --status")
                             continue
                         fault = fault_of(state)
                         if fault:
@@ -837,7 +837,7 @@ def main() -> int:
                             print(f"\n❌ 真机报故障：{fault}")
                             print("   故障是锁死的：位置照读，但电机不执行任何指令。"
                                   "请先清故障再下发：")
-                            print("   python3 examples/02_sim_to_real.py --status "
+                            print("   python3 examples/05_dual_control.py --status "
                                   "--clear-fault")
                             continue
                         start_rad = state.position_rad
@@ -968,7 +968,7 @@ def main() -> int:
     if drags == 0:
         print("\n一条指令都没下发过：拖动「目标开度」滑条真机才会动，"
               "启动之后它一直锁在当前位置。")
-    print("完成。反向的（真机 → 仿真）见 examples/03_real_to_sim.py")
+    print("完成。反向的（真机 → 仿真）见 examples/04_mirror_real.py")
     return 0
 
 

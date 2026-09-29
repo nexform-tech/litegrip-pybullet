@@ -19,10 +19,10 @@ pytest.importorskip("pybullet")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = REPO_ROOT / "examples"
 EXAMPLE_01 = EXAMPLES / "01_sim_only.py"
-EXAMPLE_02 = EXAMPLES / "02_sim_to_real.py"
-EXAMPLE_03 = EXAMPLES / "03_real_to_sim.py"
+EXAMPLE_05 = EXAMPLES / "05_dual_control.py"
+EXAMPLE_04 = EXAMPLES / "04_mirror_real.py"
 
-ALL_EXAMPLES = [EXAMPLE_01, EXAMPLE_02, EXAMPLE_03]
+ALL_EXAMPLES = [EXAMPLE_01, EXAMPLE_04, EXAMPLE_05]
 
 #: Long enough for a headless run, short enough to fail fast if it hangs.
 TIMEOUT_S = 180.0
@@ -109,9 +109,9 @@ class TestHelp:
         assert "--headless" in result.stdout
 
 
-@pytest.mark.parametrize("script", [EXAMPLE_02, EXAMPLE_03], ids=lambda p: p.name)
+@pytest.mark.parametrize("script", [EXAMPLE_05, EXAMPLE_04], ids=lambda p: p.name)
 class TestHardwareFlags:
-    """Only 02 and 03 take CAN options."""
+    """Only 04 and 05 take CAN options."""
 
     def test_can_flags_are_documented(self, script):
         result = run(script, "--help")
@@ -164,9 +164,9 @@ class TestExample01SimOnly:
         assert "URDF" in output_of(result) or "urdf" in output_of(result)
 
 
-class TestExample02NeedsAWindow:
+class TestExample05NeedsAWindow:
     def test_it_refuses_headless_and_explains_why(self):
-        result = run(EXAMPLE_02, "--headless", "--dry-run")
+        result = run(EXAMPLE_05, "--headless", "--dry-run")
         assert result.returncode == 1
         text = output_of(result)
         assert "窗口" in text
@@ -174,7 +174,7 @@ class TestExample02NeedsAWindow:
         assert "01_sim_only.py" in text
 
 
-class TestExample02Status:
+class TestExample05Status:
     """``--status`` diagnoses a wedged gripper without commanding it.
 
     Nothing here can reach hardware: the interface name cannot exist, so the
@@ -185,14 +185,14 @@ class TestExample02Status:
 
     @pytest.fixture
     def missing_interface(self, calib_file) -> subprocess.CompletedProcess:
-        result = run(EXAMPLE_02, "--status", "--channel", NOWHERE,
+        result = run(EXAMPLE_05, "--status", "--channel", NOWHERE,
                      "--calib", calib_file)
         if "找不到真机 SDK" in output_of(result):
             pytest.skip("装真机 SDK 才能测到连 CAN 这一步（pip install litegrip）")
         return result
 
     def test_it_is_documented(self):
-        assert "--status" in run(EXAMPLE_02, "--help").stdout
+        assert "--status" in run(EXAMPLE_05, "--help").stdout
 
     def test_a_missing_can_interface_is_reported_clearly(self, missing_interface):
         assert missing_interface.returncode == 1
@@ -206,12 +206,12 @@ class TestExample02Status:
         assert "未使能" in text or "不发送任何帧" in text or NOWHERE in text
 
     def test_clear_fault_without_status_is_refused(self):
-        result = run(EXAMPLE_02, "--clear-fault")
+        result = run(EXAMPLE_05, "--clear-fault")
         assert result.returncode == 1
         assert "--status" in output_of(result)
 
     def test_status_with_dry_run_is_refused(self):
-        result = run(EXAMPLE_02, "--status", "--dry-run")
+        result = run(EXAMPLE_05, "--status", "--dry-run")
         assert result.returncode == 1
         text = output_of(result)
         assert "--dry-run" in text
@@ -219,7 +219,7 @@ class TestExample02Status:
     def test_the_speed_slider_is_announced_as_a_rate_limit(self):
         """``--speed`` is a cap on the position target, not a promise to arrive
         sooner, so the help has to say what 100 % *is* — millimetres per second."""
-        stdout = run(EXAMPLE_02, "--help").stdout
+        stdout = run(EXAMPLE_05, "--help").stdout
         assert "--speed" in stdout
         assert "mm/s" in stdout
 
@@ -236,7 +236,7 @@ class TestChoosingCalibrationIsMandatory:
     def test_dry_run_without_calib_refuses(self):
         """The dry run keeps its promise never to import the SDK, so this is the
         one that runs in CI -- and ``--dry-run`` needs a calibration anyway."""
-        result = run(EXAMPLE_02, "--dry-run")
+        result = run(EXAMPLE_05, "--dry-run")
         assert result.returncode == 1, output_of(result)
         text = output_of(result)
         assert "--calib" in text
@@ -245,7 +245,7 @@ class TestChoosingCalibrationIsMandatory:
         assert "候选" in text, "没列出候选，操作员只能靠猜"
 
     def test_status_without_calib_refuses(self):
-        result = run(EXAMPLE_02, "--status")
+        result = run(EXAMPLE_05, "--status")
         if "找不到真机 SDK" in output_of(result):
             pytest.skip("装真机 SDK 才能测到这一步（裸 SDK 会在选标定之前就停）")
         assert result.returncode == 1, output_of(result)
@@ -254,7 +254,7 @@ class TestChoosingCalibrationIsMandatory:
         assert "上位机" in text
 
     def test_example_03_refuses_too(self):
-        result = run(EXAMPLE_03, "--duration", "1")
+        result = run(EXAMPLE_04, "--duration", "1")
         if "找不到真机 SDK" in output_of(result):
             pytest.skip("装真机 SDK 才能测到这一步（裸 SDK 会在选标定之前就停）")
         assert result.returncode == 1, output_of(result)
@@ -270,14 +270,14 @@ class TestChoosingCalibrationIsMandatory:
         sim.write_text(json.dumps({"zero_position_rad": 0.1,
                                    "max_position_rad": -1.0,
                                    "rad_to_mm": 50.0}), encoding="utf-8")
-        result = run(EXAMPLE_02, "--dry-run", "--calib", str(sim))
+        result = run(EXAMPLE_05, "--dry-run", "--calib", str(sim))
         assert result.returncode == 1, output_of(result)
         assert "仿真" in output_of(result)
 
     def test_a_missing_calibration_file_is_refused(self, tmp_path):
         """The SDK would silently fall back to the factory calibration here and
         return True; the example must stop instead."""
-        result = run(EXAMPLE_02, "--dry-run", "--calib",
+        result = run(EXAMPLE_05, "--dry-run", "--calib",
                      str(tmp_path / "nope.json"))
         assert result.returncode == 1, output_of(result)
         assert "不存在" in output_of(result)
@@ -285,7 +285,7 @@ class TestChoosingCalibrationIsMandatory:
     def test_the_dry_run_says_which_file_it_would_use(self, calib_file):
         """``--dry-run`` needs a calibration too, and says which one -- the whole
         reason to require it is that the numbers decide the target angles."""
-        result = run(EXAMPLE_02, "--headless", "--dry-run", "--calib", calib_file)
+        result = run(EXAMPLE_05, "--headless", "--dry-run", "--calib", calib_file)
         # 02 needs a window in every mode, so the dry-run never gets to open one
         # here; what matters is that the flag combination is still refused for
         # the window's sake, not for the calibration's.
@@ -293,7 +293,7 @@ class TestChoosingCalibrationIsMandatory:
         assert "窗口" in output_of(result)
 
 
-class TestExample03WithoutHardware:
+class TestExample04WithoutHardware:
     """03 imports the SDK before it looks at the CAN interface.
 
     Without the SDK installed it stops earlier — with a different, equally valid
@@ -302,7 +302,7 @@ class TestExample03WithoutHardware:
 
     @pytest.fixture
     def missing_interface(self, calib_file) -> subprocess.CompletedProcess:
-        result = run(EXAMPLE_03, "--channel", NOWHERE, "--duration", "1",
+        result = run(EXAMPLE_04, "--channel", NOWHERE, "--duration", "1",
                      "--calib", calib_file)
         if "找不到真机 SDK" in output_of(result):
             pytest.skip("装真机 SDK 才能测到连 CAN 这一步（pip install litegrip）")
@@ -322,7 +322,7 @@ class TestExample03WithoutHardware:
 
     def test_passive_is_documented_and_says_what_it_means(self):
         """``--passive`` is the escape hatch when another program drives CAN."""
-        stdout = run(EXAMPLE_03, "--help").stdout
+        stdout = run(EXAMPLE_04, "--help").stdout
         # argparse re-wraps the help to the terminal width, and a Chinese run of
         # characters has no space to break at, so a phrase can arrive split
         # across two lines ("…锁通信\n超时故障"). Compare it without the breaks.
@@ -340,9 +340,9 @@ class TestExample03WithoutHardware:
         installed: with it the run reaches the CAN interface, without it it
         stops earlier. Both are correct; ``--passive`` must not alter either.
         """
-        plain = run(EXAMPLE_03, "--channel", NOWHERE, "--duration", "1",
+        plain = run(EXAMPLE_04, "--channel", NOWHERE, "--duration", "1",
                     "--calib", calib_file)
-        passive = run(EXAMPLE_03, "--passive", "--channel", NOWHERE,
+        passive = run(EXAMPLE_04, "--passive", "--channel", NOWHERE,
                       "--duration", "1", "--calib", calib_file)
         assert plain.returncode == 1
         assert passive.returncode == plain.returncode
@@ -353,7 +353,7 @@ class TestExample03WithoutHardware:
 
     def test_without_the_sdk_it_says_how_to_get_it(self, calib_file):
         """The SDK-absent path is worth covering too — CI is exactly that case."""
-        result = run(EXAMPLE_03, "--channel", NOWHERE, "--duration", "1",
+        result = run(EXAMPLE_04, "--channel", NOWHERE, "--duration", "1",
                      "--calib", calib_file)
         text = output_of(result)
         assert result.returncode == 1
@@ -383,7 +383,7 @@ class TestSdkWithoutTheRequiredApi:
         """An importable ``litegrip`` package with none of the required API."""
         package = tmp_path / "litegrip"
         package.mkdir()
-        # Enough to import: 02/03 only build LiteGrip objects after the check.
+        # Enough to import: 04/05 only build LiteGrip objects after the check.
         (package / "__init__.py").write_text(
             "class LiteGrip:\n"
             "    pass\n"
@@ -397,9 +397,9 @@ class TestSdkWithoutTheRequiredApi:
     @pytest.mark.parametrize("script, args", [
         # 02 drives by drag now: its speed is a percentage, and no run-length
         # option is needed to reach the CAN interface and fail there.
-        (EXAMPLE_02, ()),
-        (EXAMPLE_03, ("--duration", "1")),
-    ], ids=["02_sim_to_real.py", "03_real_to_sim.py"])
+        (EXAMPLE_05, ()),
+        (EXAMPLE_04, ("--duration", "1")),
+    ], ids=["05_dual_control.py", "04_mirror_real.py"])
     def test_it_stops_before_connecting(self, script, args, bare_sdk):
         result = run(script, "--channel", NOWHERE, *args, env=bare_sdk)
         assert result.returncode == 1, output_of(result)

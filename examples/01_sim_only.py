@@ -270,7 +270,7 @@ def main() -> int:
         interactive(sim)
     finally:
         sim.disconnect()
-    print("\n完成。真机版本见 examples/02_sim_to_real.py")
+    print("\n完成。真机版本见 examples/05_dual_control.py")
     return 0
 
 

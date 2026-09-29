@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """_common.py — LiteGrip PyBullet 样例的共用启动样板。
 
-三个样例（01/02/03）共享这里的东西：
+三个样例（01/04/05）共享这里的东西：
 
   ensure_deps()      缺 pybullet 时自动改用仓库自带 .venv 重跑
   import_litegrip()  导入真机 SDK（已安装 / 同级 lite-grip 仓库 / $LITEGRIP_SDK_DIR）
@@ -16,7 +16,7 @@
   fresh_state()      等到一帧**新**的状态帧再读位置；等不到返回 None
                      （读真机位置只该走这里，别直接读 get_state() 的缓存）
 
-⚠️ 02/03 会驱动真机！真机的两个手指会真的闭合。首次跑请：
+⚠️ 04/05 会驱动真机！真机的两个手指会真的闭合。首次跑请：
   1) 把夹爪拿在手上或固定在台面上，**手指行程内不要放任何东西**；
   2) 手放在电源开关旁边；
   3) 先用 --dry-run（02）跑一遍看看流程。
@@ -818,7 +818,7 @@ def request_status_frame(gripper, timeout_s: float = FRESH_WAIT_S) -> bool:
 def fresh_state(gripper, timeout_s: float = FRESH_WAIT_S, *, request: bool = False):
     """等到一帧**新**的状态帧再读缓存；等不到返回 ``None``。
 
-    这是本仓库读真机位置的正确入口（02/03 都用它）。「这份位置是不是*现在*的」
+    这是本仓库读真机位置的正确入口（04/05 都用它）。「这份位置是不是*现在*的」
     这件事，SDK 的公开接口里有**两个互补**的回答，这里两道门都过才算数：
 
     * :meth:`LiteGrip.poll` —— True 表示「刚收到的这一帧是我们电机的状态帧」

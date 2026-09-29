@@ -164,7 +164,7 @@ class TestPositioning:
 
 
 class TestReset:
-    """``reset_fraction`` is the kinematic mirror used by example 03."""
+    """``reset_fraction`` is the kinematic mirror used by example 04."""
 
     @pytest.mark.parametrize("fraction", [0.0, 0.13, 0.5, 0.99, 1.0])
     def test_teleports_exactly(self, sim, fraction):

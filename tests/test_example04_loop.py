@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Example 03's mirror loop, driven end to end against a fake gripper.
+"""Example 04's mirror loop, driven end to end against a fake gripper.
 
 03 is the example where the *readout* is the product: the window is supposed to
 show where the hardware is right now.  If that pose comes from a frozen cache
@@ -34,7 +34,7 @@ if str(EXAMPLES) not in sys.path:
 
 
 def _load_example_03():
-    path = EXAMPLES / "03_real_to_sim.py"
+    path = EXAMPLES / "04_mirror_real.py"
     spec = importlib.util.spec_from_file_location("example03_loop", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["example03_loop"] = module
@@ -99,7 +99,7 @@ class FakeGripper:
             kd=KD,
         )
 
-    # ── the LiteGrip surface example 03 uses ────────────────────────────
+    # ── the LiteGrip surface example 04 uses ────────────────────────────
     def _answers(self) -> bool:
         self.polls += 1
         return bool(self.answer(self.polls))
@@ -192,7 +192,7 @@ class FakeSim:
 
 def _run(monkeypatch, gripper=None, steps=60, keys_at=None, on_tick=None,
          zero_gravity=False, passive=False):
-    """Run example 03's ``main()`` against fakes; return the pieces."""
+    """Run example 04's ``main()`` against fakes; return the pieces."""
     clock = FakeClock()
     gripper = gripper or FakeGripper()
     sim = FakeSim(clock, steps, keys_at=keys_at, on_tick=on_tick)
@@ -224,7 +224,7 @@ def _run(monkeypatch, gripper=None, steps=60, keys_at=None, on_tick=None,
 
 
 def fraction_of(rad: float) -> float:
-    """The mirror value example 03 should render for ``rad``.
+    """The mirror value example 04 should render for ``rad``.
 
     Normalised over the *calibrated travel* — the two angles the calibration
     actually measured.  Deliberately not ``(closed − rad) × rad_to_mm /

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""样例 03 · 真机控制仿真：把真机的位置实时镜像到 PyBullet 里
+"""样例 04 · 真机控制仿真：把真机的位置实时镜像到 PyBullet 里
 
 方向是 **真机 → 仿真**：真机是「主」，仿真只是显示器。每一帧读一次真机的
 位置，然后把仿真手指瞬移过去（``reset_fraction``，纯运动学，不跑动力学）——
@@ -37,11 +37,11 @@
 自己滑动。托住夹爪再看，别让它在行程中间突然松掉。
 
 运行：
-  python3 examples/03_real_to_sim.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
-  python3 examples/03_real_to_sim.py                    # 只镜像（发锁位帧保活）
-  python3 examples/03_real_to_sim.py --passive          # 不使能、一帧不发，等别人喂
-  python3 examples/03_real_to_sim.py --headless         # 无窗口，只看终端读数
-  python3 examples/03_real_to_sim.py --duration 10      # 看 10 s 后自动退出
+  python3 examples/04_mirror_real.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
+  python3 examples/04_mirror_real.py                    # 只镜像（发锁位帧保活）
+  python3 examples/04_mirror_real.py --passive          # 不使能、一帧不发，等别人喂
+  python3 examples/04_mirror_real.py --headless         # 无窗口，只看终端读数
+  python3 examples/04_mirror_real.py --duration 10      # 看 10 s 后自动退出
 """
 import argparse
 import sys
@@ -88,7 +88,7 @@ ZERO_GRAVITY_KEY = ord("z")
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="样例 03 · 真机控制仿真：把真机位置镜像到 PyBullet",
+        description="样例 04 · 真机控制仿真：把真机位置镜像到 PyBullet",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     add_common_args(ap)
@@ -130,7 +130,7 @@ def set_zero_gravity(gripper, on: bool, was_on: bool) -> bool:
 def main() -> int:
     args = parse_args()
 
-    print("样例 03 · 真机控制仿真")
+    print("样例 04 · 真机控制仿真")
     # --passive 是「只看别人的」：**不使能**、一帧都不发。以前这里也是使能了再
     # 一帧不发，于是名不副实——使能态的电机静默约 0.9 s 就自己锁 0xD 通信丢失
     # 故障。不使能的电机不需要帧，也就没有这个故障可闩，而且不用给手指任何刚度，
@@ -202,7 +202,7 @@ def main() -> int:
             if not stale and hold_rad is None:
                 # 锁位帧的目标只定这一次，之后一直重发同一个值。每拍都拿当次
                 # 读数现造目标的话，一次读数冻结就会变成一条指向伪值的新指令
-                # ——那是阶跃，见 examples/02 里 hold_frame 的说明。
+                # ——那是阶跃，见 examples/05 里 hold_frame 的说明。
                 hold_rad = state.position_rad
                 if not args.passive:
                     print(f"   [真机] 锁在实测位置 {hold_rad:+.4f} rad"
@@ -284,7 +284,7 @@ def main() -> int:
 
     what = "一帧都没发" if args.passive else f"{frames} 帧保活/零重力指令"
     print(f"完成（{what}）。"
-          f"反向的（仿真 → 真机）见 examples/02_sim_to_real.py")
+          f"反向的（仿真 → 真机）见 examples/05_dual_control.py")
     return 0
 
 

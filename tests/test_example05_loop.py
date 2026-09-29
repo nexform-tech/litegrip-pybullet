@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Example 02's *main loop*, driven end to end against a fake gripper.
+"""Example 05's *main loop*, driven end to end against a fake gripper.
 
 ``tests/test_example02_stream.py`` covers the follow-the-slider maths in
 isolation.  This file covers the part that only ever ran on real hardware
@@ -42,7 +42,7 @@ if str(EXAMPLES) not in sys.path:
 
 
 def _load_example_02():
-    path = EXAMPLES / "02_sim_to_real.py"
+    path = EXAMPLES / "05_dual_control.py"
     spec = importlib.util.spec_from_file_location("example02_loop", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["example02_loop"] = module
@@ -116,7 +116,7 @@ class FakeGripper:
             kd=KD,
         )
 
-    # ── the LiteGrip surface example 02 uses ────────────────────────────
+    # ── the LiteGrip surface example 05 uses ────────────────────────────
     def poll(self, timeout_s: float = 0.0) -> bool:
         """``LiteGrip.poll``: True = a *new* status frame arrived just now."""
         return self.answering
@@ -210,7 +210,7 @@ class FakeSim:
 
 
 class FakeSliders:
-    """Stands in for the pybullet calls example 02 uses for its sliders.
+    """Stands in for the pybullet calls example 05 uses for its sliders.
 
     The opening slider starts wherever ``addUserDebugParameter`` was told to
     start it — the example computes that from the gripper's own position — and
@@ -249,7 +249,7 @@ CALIB_FILE = dict(zero_position_rad=POS_CLOSED_RAD, max_position_rad=POS_OPEN_RA
 
 def _run(monkeypatch, gripper=None, steps=40, drag_to=None, drag_tick=3,
          quit_at=None, clock=None, speed=100.0, dry_run=False):
-    """Run ``example 02``'s ``main()`` against fakes; return the pieces."""
+    """Run ``example 05``'s ``main()`` against fakes; return the pieces."""
     clock = clock or FakeClock()
     gripper = gripper or FakeGripper(position_rad=POS_OPEN_RAD + 0.3)
     sim = FakeSim(clock, steps, quit_at=quit_at)

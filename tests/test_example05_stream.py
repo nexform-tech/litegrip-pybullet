@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Example 02's MIT stream: the follow-the-slider rate limit, and fault handling.
+"""Example 05's MIT stream: the follow-the-slider rate limit, and fault handling.
 
-This file exists because of a real failure: the first version of example 02
+This file exists because of a real failure: the first version of example 05
 streamed a *constant* target rad for the whole move, so the very first frame
 asked a ~10 Nm motor for ``kp × 1.845 rad ≈ 185 Nm``.  The gripper latched an
 under-voltage/over-current fault (blinking red LED), kept reporting its
@@ -40,8 +40,8 @@ if str(EXAMPLES) not in sys.path:
 
 
 def _load_example_02():
-    """Import ``02_sim_to_real.py`` as a module (its name is not an identifier)."""
-    path = EXAMPLES / "02_sim_to_real.py"
+    """Import ``05_dual_control.py`` as a module (its name is not an identifier)."""
+    path = EXAMPLES / "05_dual_control.py"
     spec = importlib.util.spec_from_file_location("example02", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["example02"] = module   # so dataclass/pickle lookups work
@@ -644,7 +644,7 @@ def test_a_latched_fault_is_described(error_code, monkeypatch):
 
 class TestArgs:
     def _parse(self, argv, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["02_sim_to_real.py", *argv])
+        monkeypatch.setattr(sys, "argv", ["05_dual_control.py", *argv])
         return ex02.parse_args()
 
     def test_speed_defaults_to_the_full_rating(self, monkeypatch):
@@ -675,7 +675,7 @@ class TestStatusRefusesBadCombinations:
         ``SystemExit("…")`` carries the text as its ``code``; the interpreter
         prints it and exits 1 (see the CLI-level test for the exit code).
         """
-        monkeypatch.setattr(sys, "argv", ["02_sim_to_real.py", *argv])
+        monkeypatch.setattr(sys, "argv", ["05_dual_control.py", *argv])
         with pytest.raises(SystemExit) as excinfo:
             ex02.main()
         return str(excinfo.value.code)
