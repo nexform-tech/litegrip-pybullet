@@ -271,6 +271,75 @@ class TestSliderDrive:
         # 到位的那一帧还在走完最后一步（dq≠0），从下一帧起才是静止保持。
         assert all(f["dq"] == 0.0 for f in hold[1:])
 
+    def test_the_speed_comes_down_over_the_last_frames(self):
+        """``dq`` has to decay into the target, not fall off a cliff.
+
+        This is the fix for "it reaches the target and then bounces": ``dq`` in
+        a MIT frame is a *target* velocity, so the frame that drops it to 0
+        reverses the damping term into a torque step of ``kd × v``.  At full
+        speed with this machine's ``kd = 2.0`` that is ``2.0 × 1.39 ≈ 2.8 Nm``,
+        and the position loop needs ``2.8 / kp`` = 0.56 rad of error to absorb
+        it — 40 % of the travel, which the mechanism supplies by moving
+        backwards.  With the tail slowed down, the last real move is a small
+        fraction of full speed instead.
+        """
+        drive = drive_at(OPEN_RAD, want_rad=CLOSED_RAD)
+        gripper = run_drive(drive, 400)
+        moving = [f["dq"] for f in gripper.frames if f["q"] != CLOSED_RAD]
+        assert len(moving) > 100
+
+        # Not a constant-speed run into a wall: the tail has to be slower than
+        # the body of the move, and slower each frame.
+        tail = moving[-8:]
+        assert all(b < a for a, b in zip(tail, tail[1:])), \
+            f"收尾速度没有逐帧降下来：{[round(v, 4) for v in tail]}"
+        assert tail[0] < 0.9 * max(moving), "全程匀速——收尾没有减速"
+        # And the frame before the stop is a small fraction of full speed, so
+        # the damping term it reverses is small too.
+        assert max(abs(v) for v in moving[-2:]) <= 0.15 * full_speed(), \
+            f"最后一帧仍在以 {max(abs(v) for v in moving[-2:]):.3f} rad/s 撞上去"
+        assert KD * abs(moving[-1]) < 0.2, \
+            f"停下那一刻 dq 反转出的力矩仍有 {KD * abs(moving[-1]):.3f} Nm"
+
+    def test_the_slower_tail_does_not_make_the_move_drag(self):
+        """It arrives, and the deceleration costs a bounded fraction of a second.
+
+        ``RAMP_DOWN_S`` is the time the tail is allowed to take, so the whole
+        move is the rate-limited walk plus at most that — the slider still feels
+        immediate, and nothing asymptotes towards the target forever.
+        """
+        drive = drive_at(OPEN_RAD, want_rad=CLOSED_RAD)
+        travel = abs(CLOSED_RAD - OPEN_RAD)
+        ideal = travel / (full_speed() * ex02.FRAME_DT)
+        needed = frames_to_arrive(drive)
+        assert needed <= ideal + ex02.RAMP_DOWN_S / ex02.FRAME_DT, \
+            f"到位用了 {needed} 帧，限速走完只要 {ideal:.0f} 帧"
+
+    def test_the_rate_limit_still_bounds_the_decelerating_frames(self):
+        """The tail is slower than the limit, never faster than it."""
+        drive = drive_at(OPEN_RAD, want_rad=CLOSED_RAD)
+        gripper = run_drive(drive, 400)
+        steps = [abs(b["q"] - a["q"])
+                 for a, b in zip(gripper.frames, gripper.frames[1:])]
+        assert max(steps) <= drive.max_step_rad * 1.01
+        assert worst_torque_demand(gripper.frames, KP, OPEN_RAD) < MOTOR_RATED_NM
+
+    def test_a_short_hop_decelerates_too(self):
+        """A move shorter than the deceleration distance is all tail.
+
+        Dragging one notch of the slider is this case, and it has to land on the
+        target without ever exceeding the limit — the distance it covers is
+        below ``2·a·dt²`` here, so the last frame is a clean landing.
+        """
+        want = OPEN_RAD + 0.02
+        drive = drive_at(OPEN_RAD, want_rad=want)
+        gripper = run_drive(drive, 200)
+        moving = [f for f in gripper.frames if f["q"] != want]
+        assert moving, "20 mrad 一帧就走完了——没有减速段"
+        assert all(abs(f["dq"]) < full_speed() for f in gripper.frames)
+        assert gripper.frames[-1]["q"] == want
+        assert max(abs(f["dq"]) for f in moving) <= full_speed()
+
     def test_a_closing_move_runs_the_ramp_in_the_other_direction(self):
         drive = drive_at(CLOSED_RAD, want_rad=OPEN_RAD)
         gripper = run_drive(drive, 400)

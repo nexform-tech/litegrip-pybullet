@@ -167,6 +167,28 @@ This is also why the speed limit is a limit on the *target*, not on the slider.
 Yanking the opening slider from fully open to fully closed still costs the motor
 one bounded increment per frame — the drag's own speed never reaches the bus.
 
+#### Why it slows down at the end
+
+The ramp reaches the target *and then the fingers move back a little*, most
+visibly when opening. The cause is the velocity field of an MIT frame: `dq` is a
+**target** velocity, not a measurement, so the frame that drops it from full speed
+to `0` reverses the damping term into a torque step of `kd × v`. At this machine's
+`kd = 2.0` and a full-speed `1.39 rad/s` that is about `2.8 Nm`; absorbing it needs
+`2.8 / kp = 0.56 rad` of position error at `kp = 5.0`, which is 40 % of the travel
+— more than the position loop can find, so the mechanism recoils to rebuild it.
+
+Example 02 therefore decelerates before it arrives: while the remaining distance
+is short, the commanded speed is `√(2·a·remaining)` with `a = full speed / 0.15 s`
+(`RAMP_DOWN_S`). The speed is never *above* the rate limit, so the limit stays a
+hard bound; it only makes the last few frames slower, and the frame before the
+stop is under 7 % of full speed — about `0.17 Nm` of reversed damping instead of
+`2.8 Nm`. The whole move costs at most `RAMP_DOWN_S` more than walking the
+distance at the rate limit.
+
+The SDK's own `_move_at_speed_rad` does **not** do this — it holds `dq` at the
+full speed and then sets it to `0` on the frame it stops — so the same recoil
+appears when a script drives the gripper with the SDK directly.
+
 #### If a wedged gripper reads but won't move
 
 ```bash
