@@ -77,8 +77,9 @@ class FakeGripper:
     """Stands in for a connected, enabled ``LiteGrip``.
 
     ``answer`` decides, per attempt, whether a status frame arrived — that is
-    the public signal saying the cached position is current, and a bus that has
-    gone quiet gives the same answer to a poll and to a 0xCC request.
+    the whole freshness signal: ``poll`` returns true only when a frame for our
+    motor was decoded in that call, so an ``answer`` of false means the read
+    path is looking at nothing.
     """
 
     def __init__(self, position_rad: float = START_RAD, answer=None) -> None:
@@ -86,7 +87,6 @@ class FakeGripper:
         self.answer = answer or (lambda n: True)
         self.polls = 0
         self.frames: list[dict] = []
-        self.refreshes: list[float] = []
         self.zero_gravity_calls: list[str] = []
         self.disabled = False
         self.disconnected = False
@@ -107,19 +107,12 @@ class FakeGripper:
     def poll(self, timeout_s: float = 0.0) -> bool:
         return self._answers()
 
-    def refresh_status(self, timeout_s: float = 0.5) -> bool:
-        self.refreshes.append(timeout_s)
-        return self._answers()
-
     def get_state(self, wait: bool = True):
         return SimpleNamespace(
             position_rad=self.position_rad,
             position_mm=(POS_CLOSED_RAD - self.position_rad) * RAD_TO_MM,
             force_n=0.0,
             velocity_rad_s=0.0,
-            data_age_s=0.0,
-            has_data=True,
-            is_stale=False,
             is_moving=False,
             error_code=1,
             is_error=False,
@@ -269,10 +262,13 @@ class TestMirroring:
             assert frame["tau"] == 0.0
 
     def test_passive_sends_no_frame_at_all(self, monkeypatch):
+        """``--passive`` must not put a single frame on the bus.
+
+        The read path only listens (``poll`` is a receive), so nothing here
+        talks over whatever other program is driving the motor.
+        """
         run = _run(monkeypatch, passive=True, steps=40)
         assert run.gripper.frames == []
-        assert run.gripper.refreshes == [], \
-            "--passive 说好了一帧都不发，0xCC 请求也是 CAN 帧"
         assert not run.gripper.disabled, \
             "--passive 下一帧都没发过，退出时也不该补一帧 0xFD 失能"
 
@@ -329,12 +325,17 @@ class TestItWillNotCommandAnUnmeasuredPosition:
             f"读不到状态帧还是发了 {len(run.gripper.frames)} 帧"
             f"（第一帧 q={run.gripper.frames[0]['q']:.4f}）")
 
-    def test_it_asks_for_a_frame_with_a_read_only_request(self, monkeypatch):
-        """Waiting forever is not an option either: an unfed motor stays quiet."""
+    def test_it_keeps_waiting_instead_of_waking_the_motor(self, monkeypatch):
+        """It waits, it does not prod: a read-only 0xCC request used to be sent
+        here, and that is a CAN frame this example is better off without.
+
+        The motor is enabled in this mode, so it streams status frames on its
+        own — the wait is bounded by the motor, not by a request.
+        """
         gripper = FakeGripper(answer=lambda n: False)
         run = _run(monkeypatch, gripper=gripper, steps=40)
-        assert run.gripper.refreshes, \
-            "读不到帧也不叫它一声——那就永远读不到了"
+        assert run.gripper.polls > 0, "没有在等状态帧"
+        assert run.gripper.frames == [], "读不到帧还往下发控制帧"
 
     def test_it_holds_once_the_motor_starts_answering(self, monkeypatch):
         gripper = FakeGripper(answer=lambda n: n > 3)

@@ -12,15 +12,14 @@ PyBullet——真机的电机按轨迹走，窗口里的仿真跟着显示，所
 
 前提:
   1. 真机接在 CAN 总线上（默认 can0，用 --channel 换），录制时得能够到两个手指
-  2. 装了**带轨迹接口**的那份 litegrip SDK。注意它和 04/05 要的不是同一份检出：
-     轨迹接口（record_start / play_start / Trajectory）在 litegrip-python 那条线
-     上，refresh_status / data_age_s 那几个在 lite-grip 这条线上，而两份包的版本号
-     都是 2.2.0——看版本号分不出来：
+  2. 装了带轨迹接口的 litegrip SDK（三个真机样例用的是同一份，
+     nexform-tech/litegrip-python）：
        pip install -e /path/to/litegrip-python
-     或 export LITEGRIP_TRAJ_SDK_DIR=/path/to/litegrip-python/src
-  3. 先选定这台夹爪的标定文件：录制要求 SDK 处于**已标定**状态（轨迹按行程归一，
-     没有标定就算不出开度），回放也要按本机行程把开度换算回角度。不给 --calib 就会
-     在终端里列出候选让你选，选不出来直接退出
+     或 export LITEGRIP_SDK_DIR=/path/to/litegrip-python/src
+     或把 litegrip-python 仓库克隆到本仓库的同级目录
+  3. 一份可用的标定：录制要求 SDK 处于**已标定**状态（轨迹按行程归一，没有标定
+     就算不出开度），回放也要按本机行程把开度换算回角度。不给 --calib 就用 SDK
+     包里那份出厂标定；出厂文件也读不出来才会在终端里列候选让你选
   4. 录制需要手指能被推动，所以录制期间**不要**让别的程序同时驱动这台夹爪
 
 两种用法:
@@ -62,9 +61,10 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     add_hardware_args,
     calibration_summary,
     check_calibration_matches_args,
-    check_trajectory_sdk_api,
+    check_sdk_api,
     choose_calibration_file,
-    import_trajectory_litegrip,
+    factory_calibration_path,
+    import_litegrip,
     load_chosen_calibration,
     rad_to_fraction,
     read_calibration_file,
@@ -136,12 +136,12 @@ def parse_args():
 def open_gripper(args, litegrip):
     """连接真机：选标定 → connect → 载入并核实标定 → 使能。
 
-    这是 :func:`_common.open_real_gripper` 的同一条流程，只去掉了
-    ``check_sdk_api``：03 用的是带**轨迹**接口的那份 SDK，而那份清单查的是新鲜度
-    接口（``refresh_status`` / ``data_age_s``），轨迹那份没有也不该有。标定这一段
-    一个字都没省——轨迹按行程归一，标定错了，录下来和放出去的都是错的角。
+    这是 :func:`_common.open_real_gripper` 的同一条流程，只把 SDK 模块换成调用方
+    传进来的那个（main 已经导入并查过接口清单）。标定这一段一个字都没省——轨迹按
+    行程归一，标定错了，录下来和放出去的都是错的角。
     """
-    calib_path = choose_calibration_file(args.calib)
+    calib_path = choose_calibration_file(
+        args.calib, factory=factory_calibration_path(litegrip))
     calib = read_calibration_file(calib_path)
     notes = check_calibration_matches_args(calib, channel=args.channel,
                                            can_id=args.can_id,
@@ -184,10 +184,11 @@ def open_gripper(args, litegrip):
 def read_state(gripper, timeout_s=POLL_WAIT_S):
     """读一帧状态；这一帧没等到就返回 ``None``。
 
-    只用 ``poll`` + ``get_state(wait=False)``，也就是轨迹那份 SDK 的公开接口
-    （``refresh_status`` 那种只读唤醒帧只在 04/05 用的那份里有）。等不到就返回
-    ``None``，调用方**不许**拿缓存里的数当位置——缓存里可能是 ``MotorState`` 的
-    初值 ``0.0``，那不是「夹爪在 0 弧度」，是「从没读到过」。
+    这是 :func:`_common.fresh_state` 的同一条判据，只是多吞一层传输异常（真机在
+    CAN 适配器掉线时会抛）。``poll`` 为真就意味着这次调用里解出了一帧本电机的状态
+    帧，所以紧随其后的快照是实测值。等不到就返回 ``None``，调用方**不许**拿缓存里
+    的数当位置——缓存里可能是 ``MotorState`` 的初值 ``0.0``，那不是「夹爪在 0 弧
+    度」，是「从没读到过」。
     """
     try:
         if not gripper.poll(timeout_s=timeout_s):
@@ -521,10 +522,10 @@ def main():
                  "，不连真机"))
     else:
         print(SAFETY_BANNER)
-    # 03 要的是带**轨迹**接口的那份 SDK，和 04/05 用的那份不是同一个检出
-    # （两份的 __version__ 都是 2.2.0，只能按能力分辨）。缺接口就在这里停。
-    litegrip = import_trajectory_litegrip()
-    check_trajectory_sdk_api(litegrip)
+    # 三个真机样例用的是同一份 SDK（nexform-tech/litegrip-python）。缺接口就
+    # 别连——宁可现在停，也别在循环里才发现。
+    litegrip = import_litegrip()
+    check_sdk_api(litegrip)
 
     print("\n[1] 载入仿真模型")
     sim = GripperSim(urdf_path=args.urdf, gui=not args.headless, gravity=(0, 0, 0))

@@ -8,13 +8,17 @@
 
 前提:
   1. 真机接在 CAN 总线上（默认 can0，用 --channel 换）
-  2. 装了本仓库要的 litegrip SDK（没有发布到 PyPI，从源码装）:
-       pip install -e /path/to/lite-grip
-  3. 先选定这台夹爪的标定文件。标定文件由上位机标定后保存得到：
+  2. 装了本仓库要的 litegrip SDK（没有发布到 PyPI，从源码装；三个真机样例用的是
+     同一份，nexform-tech/litegrip-python）:
+       pip install -e /path/to/litegrip-python
+     或 export LITEGRIP_SDK_DIR=/path/to/litegrip-python/src
+     或把 litegrip-python 仓库克隆到本仓库的同级目录
+  3. 一份可用的标定。标定文件由上位机标定后保存得到：
        litegrip-studio / litegrip-console，或 SDK 自带的 tools/gui/litegrip_gui.py
-     不给 --calib 就会在终端里列出候选让你选，选不出来（非交互、没有候选）直接
-     退出——**不会**用 SDK 的默认标定，更不会回退出厂标定。仿真的百分比和毫米都由
-     标定的角度 / ``rad_to_mm`` 换算而来，拿别台机器的刻度换算，画面就是错的。
+     仿真的百分比和毫米都由标定的角度 / ``rad_to_mm`` 换算而来，拿别台机器的刻度
+     换算，画面就是错的。所以优先用 ``--calib`` 指**这台夹爪**自己那份；不给就用
+     SDK 包里那份出厂标定（台架夹具的实测参数），出厂文件也读不出来才会在终端里
+     列出候选让你选，选不出来（非交互、没有候选）直接退出。
 
 两种用法：
 
@@ -41,7 +45,7 @@
             留下通信超时故障——使能态静默约 0.9 s 就锁 0xD）
 
 运行:
-  python3 examples/04_mirror_real.py --zero-gravity --calib ~/.litegrip/litegrip_calibration.json
+  python3 examples/04_mirror_real.py --zero-gravity --calib /path/to/这台夹爪的标定.json
   python3 examples/04_mirror_real.py                    # 只镜像（发锁位帧保活）
   python3 examples/04_mirror_real.py --passive          # 不使能、一帧不发，等别人喂
   python3 examples/04_mirror_real.py --headless         # 无窗口，只看终端读数
@@ -58,7 +62,6 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     fresh_state,
     open_real_gripper,
     rad_to_fraction,
-    request_status_frame,
     status_line,
 )
 
@@ -228,16 +231,13 @@ def main():
                     frames += 1
                 else:
                     # 还没读到过位置：不造锁位帧——目标只能是实测位置，拿缓存的伪值
-                    # 当目标是发一条阶跃指令出去，比少发一帧危险得多。但也不能干
-                    # 等：电机不会自己发状态帧，等下去就一直是等。所以发一帧**只
-                    # 读**的 0xCC 刷新请求（SDK 原话 "Does not change motor
-                    # output"）把它叫醒，下一拍就有位置可锁了。
-                    request_status_frame(gripper)
+                    # 当目标是发一条阶跃指令出去，比少发一帧危险得多。
+                    # 这里电机是**使能态**，自己会持续发状态帧，所以只是还在等
+                    # （enable 之后总要先收到第一帧）；不额外发任何请求帧去催它。
                     starved += 1
                     if starved % 200 == 1:
-                        print(f"   [真机] 读不到状态帧（第 {starved} 次）：已发一帧"
-                              "只读的 0xCC 状态请求（不改电机输出）。\n"
-                              "      读到实测位置才开始发锁位帧——"
+                        print(f"   [真机] 还在等状态帧（第 {starved} 次）："
+                              "读到实测位置才开始发锁位帧——"
                               "目标必须是实测位置，不能拿缓存的伪值造。")
 
             real_fraction = rad_to_fraction(gripper, state.position_rad)

@@ -5,29 +5,32 @@
 五个样例（01–05）共享这里的东西：
 
   ensure_deps()      缺 pybullet 时自动改用仓库自带 .venv 重跑
-  import_litegrip()  导入真机 SDK（已安装 / 同级 lite-grip 仓库 / $LITEGRIP_SDK_DIR）
+  import_litegrip()  导入真机 SDK（$LITEGRIP_SDK_DIR / 同级 litegrip-python
+                     仓库 / 已安装的 litegrip）
   check_sdk_api()    核对 SDK 有没有本仓库依赖的公开接口，缺了就在启动时停下
-  import_trajectory_litegrip()  03 用的**另一份** SDK：带轨迹录制/回放的那份
-                     （同级 litegrip-python 仓库 / $LITEGRIP_TRAJ_SDK_DIR）
   add_common_args()  --urdf / --headless
   add_hardware_args() --channel / --can-id / --mst-id / --calib
-  choose_calibration_file() 定下这次用**哪一份**标定：--calib 指定，或当场从候选里
-                     选。**不接受默认标定**，也不回退出厂标定
+  factory_calibration_path()  SDK 包里那份出厂标定文件的路径（跟着包走）
+  choose_calibration_file() 定下这次用**哪一份**标定：--calib 指定 → SDK 出厂
+                     标定 → 两个都没有才当场从候选里选
   calibration_config()  把标定文件装成 ``gripper.config`` 的形状（--dry-run 用）
   open_real_gripper() 连接 → 载入并核实标定 → 使能，失败时给出可读的提示
   fresh_state()      等到一帧**新**的状态帧再读位置；等不到返回 None
                      （读真机位置只该走这里，别直接读 get_state() 的缓存）
+
+三个真机样例（03/04/05）用**同一份** SDK 检出：带轨迹录制/回放的那份
+（``nexform-tech/litegrip-python``）。它不在 PyPI 上，`pip install litegrip`
+装到的是别的代码，所以要从检出装或把目录指出来——见 :func:`import_litegrip`。
 
 04/05 会驱动真机！真机的两个手指会真的闭合。首次跑请：
   1) 把夹爪拿在手上或固定在台面上，**手指行程内不要放任何东西**；
   2) 手放在电源开关旁边；
   3) 先用 --dry-run（05）跑一遍看看流程。
 
-每次跑都要**先选定这台夹爪的标定文件**（见 :func:`choose_calibration_file`）：
-标定的角度/毫米刻度是从这台机器上量出来的，用别人（或出厂）的那份算目标角，
-轻则夹不住、重则一条指令直接撞限位。标定文件由上位机标定后保存得到
-（``litegrip-studio`` / ``litegrip-console``，或 SDK 自带的
-``tools/gui/litegrip_gui.py``）。
+不指定 ``--calib`` 时用的是 SDK 包里那份**出厂标定**——它是台架夹具的实测参数，
+而标定的角度/毫米刻度本该是每台夹爪单独量的。拿不准就用 ``--calib`` 指这台夹爪
+自己的那份：上位机 ``litegrip-studio`` / ``litegrip-console`` 标定后保存，或
+SDK 自带的 ``tools/gui/litegrip_gui.py``。
 
 真机跑之前确认 CAN 已配置好：
 
@@ -53,7 +56,6 @@ __all__ = [
     "REQUIRED_SDK_API",
     "SAFETY_BANNER",
     "SIM_CALIBRATION_MARKER",
-    "TRAJECTORY_SDK_API",
     "add_common_args",
     "add_hardware_args",
     "bootstrap_src",
@@ -64,30 +66,27 @@ __all__ = [
     "check_calibration_matches_args",
     "check_calibration_values",
     "check_sdk_api",
-    "check_trajectory_sdk_api",
     "choose_calibration_file",
     "ensure_deps",
+    "factory_calibration_path",
     "fraction_to_target_rad",
     "fresh_state",
     "import_litegrip",
-    "import_trajectory_litegrip",
     "load_chosen_calibration",
     "missing_sdk_api",
-    "missing_trajectory_sdk_api",
     "open_real_gripper",
     "rad_to_fraction",
     "read_calibration_file",
-    "request_status_frame",
     "sdk_dir",
     "status_line",
-    "trajectory_sdk_dir",
 ]
 
 #: 真机样例开跑前打印的横幅。
 SAFETY_BANNER = """\
 即将驱动真机：夹爪两个手指会真实运动。
     请确认行程内无遮挡、人员远离，并让电源开关触手可及。
-    再确认一次：下面打印的那份标定文件，是**这台夹爪**标出来的。
+    再确认一次下面打印的那份标定文件：它是**这台夹爪**标出来的，还是 SDK 自带的
+    出厂标定（台架夹具的实测参数）。用出厂那份驱动，行程端点可能与这台对不上。
     随时按 Esc / Q 停止（会等当前这条指令走完再退出）。"""
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -124,135 +123,19 @@ def ensure_deps() -> None:
 def sdk_dir() -> Path | None:
     """真机 SDK（``litegrip`` 包）所在目录，找不到返回 ``None``。
 
-    顺序：``$LITEGRIP_SDK_DIR`` → 已安装的 ``litegrip`` → 同级 ``lite-grip`` 仓库。
+    顺序：``$LITEGRIP_SDK_DIR`` → 同级 ``litegrip-python`` 仓库 → 已安装的
+    ``litegrip``。
+
+    为什么同级检出排在**已安装的**前面：本仓库要的是带轨迹录制/回放的那份
+    （``litegrip-python``），而机器上装着的 ``litegrip`` 可能是另一个仓库的同名
+    包——两份的 ``__version__`` 都是 ``2.2.0``，光看版本号分不出来。同级目录就在
+    眼前、名字点得很明确，优先信它。
     """
     env = os.environ.get("LITEGRIP_SDK_DIR")
     if env:
         return Path(env).expanduser()
-    try:
-        import litegrip  # noqa: F401
-
-        return Path(litegrip.__file__).resolve().parent.parent
-    except Exception:
-        pass
-    for name in ("lite-grip", "litegrip"):
-        sibling = _REPO_ROOT.parent / name
-        if (sibling / "litegrip" / "__init__.py").is_file():
-            return sibling
-    return None
-
-
-def import_litegrip():
-    """导入真机 SDK，失败时给出安装提示并退出。
-
-    Returns:
-        已导入的 ``litegrip`` 模块。
-    """
-    directory = sdk_dir()
-    if directory is not None and str(directory) not in sys.path:
-        sys.path.insert(0, str(directory))
-    try:
-        import litegrip
-    except ImportError as exc:
-        raise SystemExit(
-            "找不到真机 SDK（litegrip 包）。\n"
-            "   litegrip **没有发布到 PyPI**，`pip install litegrip` 装的不是它；\n"
-            "   本仓库要的是带 refresh_status() / GripperState.data_age_s 这些公开\n"
-            "   接口的检出。三种任选其一：\n"
-            "   1) python3 -m pip install -e /path/to/lite-grip\n"
-            "   2) export LITEGRIP_SDK_DIR=/path/to/lite-grip\n"
-            "   3) 把 lite-grip 仓库克隆到本仓库的同级目录\n"
-            f"   （原始错误：{exc}）"
-        ) from exc
-    return litegrip
-
-
-#: 本仓库依赖的 SDK 公开接口。清单化而不是散在各调用处：缺哪一个就在**启动时**
-#: 说清楚该换哪份 SDK，而不是在发帧的循环里抛 AttributeError。
-#:
-#: 这些接口目前**没有任何发行版带**（litegrip 也不在 PyPI 上），所以
-#: ``pip install litegrip`` 装到的那份一定缺它们——这正是要拦的情况。
-REQUIRED_SDK_API: tuple[tuple[str, str], ...] = (
-    ("LiteGrip.refresh_status",
-     "发一帧只读的 0xCC 并等回应，电机不发帧时唯一能读到位置的公开路径"),
-    ("GripperState.data_age_s",
-     "这一帧有多旧（从没收到过是 inf）——判断读数能不能用"),
-    ("GripperState.has_data", "到底收到过状态帧没有"),
-    ("GripperState.is_stale", "这一帧是不是已经过期"),
-)
-
-
-def missing_sdk_api(litegrip) -> list[str]:
-    """已导入的 SDK 里缺哪些必需接口（按 :data:`REQUIRED_SDK_API` 的顺序）。"""
-    missing: list[str] = []
-    for path, _why in REQUIRED_SDK_API:
-        owner, _, attr = path.partition(".")
-        if not hasattr(getattr(litegrip, owner, None), attr):
-            missing.append(path)
-    return missing
-
-
-def check_sdk_api(litegrip) -> None:
-    """缺必需接口就带着「该用哪份 SDK」退出（``SystemExit``）。
-
-    **不保留降级路径**：没有这些接口，要么只能去够 SDK 的内部实现（以前就是
-    靠 ``gripper._can._controller`` 借的），要么只能猜「这一帧是不是现在的」。
-    真机样例宁可不跑，也不拿一个猜出来的位置去算目标角——那正是一条指向别处的
-    阶跃指令的成因。
-    """
-    missing = missing_sdk_api(litegrip)
-    if not missing:
-        return
-    why = dict(REQUIRED_SDK_API)
-    directory = sdk_dir()
-    raise SystemExit(
-        "这份 litegrip SDK 缺少本仓库必须的公开接口：\n"
-        + "".join(f"     • {path} —— {why[path]}\n" for path in missing)
-        + "   litegrip **没有发布到 PyPI**（`pip install litegrip` 装到的不是这份"
-          "代码），\n"
-          "   带这些接口的版本也还没发布过。请改用本地检出：\n"
-          "     python3 -m pip install -e /path/to/lite-grip          # 或\n"
-          "     export LITEGRIP_SDK_DIR=/path/to/lite-grip\n"
-        + (f"   （这次导入到的是：{directory}）" if directory is not None else "")
-    )
-
-
-#: **03（轨迹录制/回放）**要的 SDK 公开接口。
-#:
-#: 它和 :data:`REQUIRED_SDK_API` 那份**不在同一份检出里**，这是写在这里最要紧的
-#: 一句话：轨迹录制/回放只在 ``litegrip-python`` 那条线上，而
-#: ``refresh_status`` / ``data_age_s`` 那几个只在 ``lite-grip`` 这条线上。两份包的
-#: ``__version__`` 都是 ``2.2.0``，**看版本号分不出来**——只能按能力分辨，所以两条
-#: 线各自列一份清单、各自报缺什么。
-TRAJECTORY_SDK_API: tuple[tuple[str, str], ...] = (
-    ("LiteGrip.record_start",
-     "在后台开始录制；zero_gravity=True 时由它自己流零力矩帧"),
-    ("LiteGrip.record_stop", "停止录制并取回轨迹"),
-    ("LiteGrip.play_start",
-     "在后台开始回放——主循环才腾得出手同步刷仿真（play() 会阻塞到放完）"),
-    ("LiteGrip.play_stop", "停止回放，并把夹爪留在最后一个目标位上"),
-    ("LiteGrip.trajectory_status",
-     "录制/回放的进度：active / completed / openness"),
-    ("Trajectory.load", "读回一段 ``.lgt``（纯文件 I/O，不碰 CAN）"),
-)
-
-
-def trajectory_sdk_dir() -> Path | None:
-    """带轨迹录制/回放的 SDK 目录，找不到返回 ``None``。
-
-    顺序：``$LITEGRIP_TRAJ_SDK_DIR`` → 同级 ``litegrip-python`` 仓库 →
-    已安装的 ``litegrip``。
-
-    为什么**不**复用 :func:`sdk_dir`、也不复用 ``$LITEGRIP_SDK_DIR``：那条路是给
-    04/05 找「带新鲜度接口」的那份的，而 :func:`check_sdk_api` 会在启动时拦下不带
-    那些接口的 SDK。把一个变量同时当成两条线的入口，结果就是把 ``$LITEGRIP_SDK_DIR``
-    指向轨迹那份之后，04/05 反而一开跑就退出。两个变量、两份清单，各自点名。
-    """
-    env = os.environ.get("LITEGRIP_TRAJ_SDK_DIR")
-    if env:
-        return Path(env).expanduser()
-    # 同级检出：``litegrip-python`` 是 src 布局（包在 src/litegrip），也接受把包直接
-    # 放在仓库根下的布局——两种都试，免得只认一种。
+    # 同级检出：``litegrip-python`` 是 src 布局（包在 src/litegrip），也接受把包
+    # 直接放在仓库根下的布局——两种都试，免得只认一种。
     sibling = _REPO_ROOT.parent / "litegrip-python"
     for candidate in (sibling / "src", sibling):
         if (candidate / "litegrip" / "__init__.py").is_file():
@@ -265,26 +148,151 @@ def trajectory_sdk_dir() -> Path | None:
         return None
 
 
-def missing_trajectory_sdk_api(litegrip) -> list[str]:
-    """已导入的 SDK 里缺哪些轨迹接口（按 :data:`TRAJECTORY_SDK_API` 的顺序）。"""
+def import_litegrip():
+    """导入真机 SDK，失败时给出安装提示并退出。
+
+    先找目录再**显式加载**，不能靠 ``sys.path`` 顺序：``pip install -e`` 装的那份
+    会注册一个 meta path finder，优先级高于 ``sys.path``，把目录插到最前面也没用
+    ——理由见 :func:`_load_package_from`。
+
+    ``$LITEGRIP_SDK_DIR`` 指错目录时**不悄悄换一份**：本机装着的 ``litegrip`` 可能
+    是另一个仓库的同名包（两份的 ``__version__`` 都是 2.2.0），悄悄换过去会让人以
+    为「指了却能跑」，实际跑的是别的代码。
+
+    Returns:
+        已导入的 ``litegrip`` 模块。
+    """
+    directory = sdk_dir()
+    if directory is not None:
+        try:
+            module = _load_package_from(directory)
+        except Exception as exc:           # 那份检出自己炸了（语法错误等）
+            raise SystemExit(f"从 {directory} 加载 litegrip 失败：{exc}") from exc
+        if module is not None:
+            return module
+        requested = os.environ.get("LITEGRIP_SDK_DIR")
+        if requested:
+            raise SystemExit(
+                f"找不到真机 SDK（litegrip 包）：LITEGRIP_SDK_DIR 指到 {requested}，"
+                f"但那里没有 litegrip/__init__.py。\n"
+                "   这个变量要指到**包所在目录**（src 布局就是 "
+                "<仓库>/litegrip-python/src），不是仓库根、也不是包目录本身。\n"
+                "   不想指定就 unset LITEGRIP_SDK_DIR；否则三种任选其一：\n"
+                "   1) python3 -m pip install -e /path/to/litegrip-python\n"
+                "   2) export LITEGRIP_SDK_DIR=/path/to/litegrip-python/src\n"
+                "   3) 把 litegrip-python 仓库克隆到本仓库的同级目录"
+            )
+        # 走到这里说明是自己找到的目录（同级检出 / 已安装包）里没有包——同级目录
+        # 名字没对上而已，落到下面的 import 再看。
+    try:
+        import litegrip
+    except ImportError as exc:
+        raise SystemExit(
+            "找不到真机 SDK（litegrip 包）。\n"
+            "   litegrip **没有发布到 PyPI**，`pip install litegrip` 装的不是它；\n"
+            "   本仓库要的是带轨迹录制/回放的那份检出\n"
+            "   （nexform-tech/litegrip-python）。三种任选其一：\n"
+            "   1) python3 -m pip install -e /path/to/litegrip-python\n"
+            "   2) export LITEGRIP_SDK_DIR=/path/to/litegrip-python/src\n"
+            "   3) 把 litegrip-python 仓库克隆到本仓库的同级目录\n"
+            f"   （原始错误：{exc}）"
+        ) from exc
+    return litegrip
+
+
+#: 本仓库依赖的 SDK 公开接口。清单化而不是散在各调用处：缺哪一个就在**启动时**
+#: 说清楚该换哪份 SDK，而不是在发帧的循环里抛 AttributeError。
+#:
+#: 三个真机样例（03/04/05）用的是**同一份**检出，所以这里是一份并集：轨迹那几个是
+#: 03 要的，其余是 04/05 要的。分两份清单是上一版的事——那时「新鲜度」接口
+#: （``refresh_status`` / ``GripperState.data_age_s``）和轨迹接口分在两个仓库里，
+#: 只能按能力分辨（两份的 ``__version__`` 都是 2.2.0）。现在统一到带轨迹那份，
+#: 它**没有**那几个新鲜度接口，读取新鲜度只靠 :func:`fresh_state` 里的 ``poll()``
+#: ——理由写在那里。
+#:
+#: 这些接口目前没有任何发行版带（litegrip 也不在 PyPI 上），所以
+#: ``pip install litegrip`` 装到的那份一定缺它们——这正是要拦的情况。
+#:
+#: 写法是 ``名字.属性`` 或裸的模块级名字（如 ``trajectory_dir``），两种都认。
+REQUIRED_SDK_API: tuple[tuple[str, str], ...] = (
+    ("LiteGrip.connect", "连上 CAN 并注册夹爪"),
+    ("LiteGrip.enable", "使能电机——不使能就一个运动指令都发不出去"),
+    ("LiteGrip.disable", "退出前把电机放回失力状态"),
+    ("LiteGrip.disconnect", "关掉 CAN 连接"),
+    ("LiteGrip.poll",
+     "等一帧**状态帧**；fresh_state() 靠它区分「刚量到的」和「缓存里的」"),
+    ("LiteGrip.get_state", "读一次位置/速度/力矩/错误码快照"),
+    ("LiteGrip.send_mit_frame", "发一帧 MIT 指令：锁位帧和零力矩帧都走它"),
+    ("LiteGrip.read_param", "按 RID 读电机寄存器（只读诊断用）"),
+    ("LiteGrip.clear_fault", "清锁存的故障码"),
+    ("LiteGrip.enter_zero_gravity", "进零重力：03/04 靠它让人手拖动手指"),
+    ("LiteGrip.exit_zero_gravity", "退出零重力并锁在当前位"),
+    ("LiteGrip.move_at_speed", "按速度走一段（05 的滑条路径）"),
+    ("LiteGrip.load_calibration", "载入标定文件——毫米刻度和行程端点都从它来"),
+    ("LiteGrip.record_start",
+     "在后台开始录制；zero_gravity=True 时由它自己流零力矩帧"),
+    ("LiteGrip.record_stop", "停止录制并取回轨迹"),
+    ("LiteGrip.play_start",
+     "在后台开始回放——主循环才腾得出手同步刷仿真（play() 会阻塞到放完）"),
+    ("LiteGrip.play_stop", "停止回放，并把夹爪留在最后一个目标位上"),
+    ("LiteGrip.trajectory_status",
+     "录制/回放的进度：active / completed / openness"),
+    ("GripperState.position_rad", "状态快照里的电机角，开度换算的输入"),
+    ("Trajectory.load", "读回一段 ``.lgt``（纯文件 I/O，不碰 CAN）"),
+    ("Trajectory.openness_at", "按时间取归一化开度——离线 --play 靠它驱动仿真"),
+    ("trajectory_dir", "轨迹默认存在哪（``~/.litegrip/trajectories``）"),
+)
+
+
+def missing_sdk_api(litegrip) -> list[str]:
+    """已导入的 SDK 里缺哪些必需接口（按 :data:`REQUIRED_SDK_API` 的顺序）。"""
     missing: list[str] = []
-    for path, _why in TRAJECTORY_SDK_API:
-        owner, _, attr = path.partition(".")
-        if not hasattr(getattr(litegrip, owner, None), attr):
+    for path, _why in REQUIRED_SDK_API:
+        owner, sep, attr = path.partition(".")
+        if sep:
+            found = hasattr(getattr(litegrip, owner, None), attr)
+        else:
+            found = hasattr(litegrip, owner)   # 模块级的名字，如 trajectory_dir
+        if not found:
             missing.append(path)
     return missing
+
+
+def check_sdk_api(litegrip) -> None:
+    """缺必需接口就带着「该用哪份 SDK」退出（``SystemExit``）。
+
+    **不保留降级路径**：这些接口没有替代品——录制是 SDK 在后台线程里按自己的节拍
+    采样和发帧的，自己拿 ``send_mit_frame`` 拼一个循环只会得到一份节拍对不上的
+    样本。真机样例宁可不跑，也不拿一个猜出来的位置去算目标角——那正是一条指向别处
+    的阶跃指令的成因。
+    """
+    missing = missing_sdk_api(litegrip)
+    if not missing:
+        return
+    why = dict(REQUIRED_SDK_API)
+    directory = sdk_dir()
+    raise SystemExit(
+        "这份 litegrip SDK 缺少本仓库必须的公开接口：\n"
+        + "".join(f"     • {path} —— {why[path]}\n" for path in missing)
+        + "   litegrip **没有发布到 PyPI**（`pip install litegrip` 装到的不是这份"
+          "代码）。\n"
+          "   本仓库要的是带轨迹录制/回放的那份检出，请指到它：\n"
+          "     python3 -m pip install -e /path/to/litegrip-python  # 或\n"
+          "     export LITEGRIP_SDK_DIR=/path/to/litegrip-python/src\n"
+        + (f"   （这次导入到的是：{directory}）" if directory is not None else "")
+    )
 
 
 def _load_package_from(directory):
     """从指定目录显式加载 ``litegrip`` 包，不走 ``import litegrip``。
 
     为什么必须显式加载：``pip install -e`` 装的那份会注册一个 **meta path
-    finder**，它的优先级高于 ``sys.path``——所以「把轨迹那份插到 sys.path 最前面」
-    在装了 editable 版的机器上一点用都没有，``import litegrip`` 拿到的还是那份缺
-    轨迹接口的。这里是同一个包名的两份检出并存，只能按目录点名加载。
+    finder**，它的优先级高于 ``sys.path``——所以「把要用的那份插到 sys.path 最
+    前面」在装了 editable 版的机器上一点用都没有，``import litegrip`` 拿到的还是
+    装的哪份。同级目录 checkout 与已安装的包同名时，只能按目录点名加载。
 
-    副作用是 ``sys.modules["litegrip"]`` 被换掉（包括它已经导入过的子模块）：03 这
-    个进程从这一句起就用这一份，这正是想要的。别在同一个进程里再用另一份。
+    副作用是 ``sys.modules["litegrip"]`` 被换掉（包括它已经导入过的子模块）：这个
+    进程从这一句起就用这一份，这正是想要的。
     """
     import importlib.util
 
@@ -304,66 +312,6 @@ def _load_package_from(directory):
         sys.modules.pop("litegrip", None)
         raise
     return module
-
-
-def import_trajectory_litegrip():
-    """导入**带轨迹接口**的那份 SDK，失败时给出安装提示并退出。
-
-    与 :func:`import_litegrip` 分开：03 要的和 04/05 要的不是同一份检出（见
-    :data:`TRAJECTORY_SDK_API`），这里只管把 ``litegrip`` 从轨迹那份的目录上导进来。
-
-    要先找目录再显式加载，不能靠目录顺序——理由见 :func:`_load_package_from`。
-
-    Returns:
-        已导入的 ``litegrip`` 模块。
-    """
-    directory = trajectory_sdk_dir()
-    if directory is not None:
-        try:
-            module = _load_package_from(directory)
-        except Exception as exc:           # 那份检出自己炸了（语法错误等）
-            raise SystemExit(
-                f"从 {directory} 加载 litegrip 失败：{exc}"
-            ) from exc
-        if module is not None:
-            return module
-    try:
-        import litegrip
-    except ImportError as exc:
-        raise SystemExit(
-            "找不到带轨迹录制/回放的 litegrip SDK。\n"
-            "   本样例（03）用到的 record_start / play_start / Trajectory 这些接口\n"
-            "   只在那份 SDK 检出里，**不在** 04/05 用的那份里（两份都是 2.2.0，\n"
-            "   看版本号分不出来）。三种任选其一：\n"
-            "   1) python3 -m pip install -e /path/to/litegrip-python\n"
-            "   2) export LITEGRIP_TRAJ_SDK_DIR=/path/to/litegrip-python/src\n"
-            "   3) 把 litegrip-python 仓库克隆到本仓库的同级目录\n"
-            f"   （原始错误：{exc}）"
-        ) from exc
-    return litegrip
-
-
-def check_trajectory_sdk_api(litegrip) -> None:
-    """缺轨迹接口就带着「该用哪份 SDK」退出（``SystemExit``）。
-
-    和 :func:`check_sdk_api` 一样**不保留降级路径**：这些接口没有替代品——录制是
-    SDK 在后台线程里按自己的节拍采样和发帧的，自己拿 ``send_mit_frame`` 拼一个循环
-    只会得到一份节拍对不上的样本。宁可现在停。
-    """
-    missing = missing_trajectory_sdk_api(litegrip)
-    if not missing:
-        return
-    why = dict(TRAJECTORY_SDK_API)
-    directory = trajectory_sdk_dir()
-    raise SystemExit(
-        "这份 litegrip SDK 缺少轨迹录制/回放的公开接口：\n"
-        + "".join(f"     • {path} —— {why[path]}\n" for path in missing)
-        + "   这些接口在 litegrip-python 那条线上；04/05 用的那份（带\n"
-          "   refresh_status() / data_age_s 的）没有它们。请指到轨迹那份：\n"
-          "     python3 -m pip install -e /path/to/litegrip-python     # 或\n"
-          "     export LITEGRIP_TRAJ_SDK_DIR=/path/to/litegrip-python/src\n"
-        + (f"   （这次导入到的是：{directory}）" if directory is not None else "")
-    )
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -395,9 +343,11 @@ def add_hardware_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--calib", default=None,
-        help="标定文件路径（**必须是这台夹爪的标定**；不给会在终端里列候选让你选，"
-             "脚本/非交互必须给）。标定文件在上位机（litegrip-studio / "
-             "litegrip-console）标定后保存得到；SDK 的默认标定和出厂标定都不接受",
+        help="标定文件路径。不给就用 SDK 包里那份**出厂标定**（台架夹具的实测"
+             "参数，跟着 SDK 包走，换电脑也指得到）；要按这**台**夹爪自己的尺寸"
+             "驱动，就得给出它的标定。出厂文件也读不出来时才在终端里列候选让你"
+             "选。标定文件由 litegrip-studio / litegrip-console 对着真机标定后"
+             "保存得到",
     )
 
 
@@ -458,6 +408,23 @@ def calibration_config(data: dict, *, max_stroke_mm: float = NOMINAL_STROKE_MM):
     values.update({attr: data[key] for key, attr in _CALIB_FIELDS if key in data})
     values["max_stroke_mm"] = max_stroke_mm
     return SimpleNamespace(**values)
+
+
+def factory_calibration_path(litegrip) -> Path:
+    """SDK 包里那份**出厂标定**的路径。
+
+    跟着 ``litegrip`` 包所在目录解析（``<包目录>/factory_calibration.json``），
+    所以换电脑、换虚拟环境、换 SDK 检出都指得到——**不要**把它写成某个本机绝对
+    路径，这正是这个函数存在的理由。
+
+    SDK 自己把这份文件当作 ``load_calibration()`` 的最后一级兜底（它内部叫
+    ``_FACTORY_CALIB``，是私有的，这里按包目录自己拼，不碰私有名字）。
+
+    这份文件是**台架夹具的实测参数**，不是每台夹爪各自量的：它是一份能用的默认
+    值，不是「这台夹爪的标定」。要按这台夹爪自己的尺寸驱动，用 ``--calib`` 指
+    上位机保存的那份。
+    """
+    return Path(litegrip.__file__).resolve().parent / "factory_calibration.json"
 
 
 def calibration_candidates(directories=None) -> list[Path]:
@@ -572,23 +539,25 @@ def read_calibration_file(path) -> dict:
     return data
 
 
-def choose_calibration_file(requested=None, *, candidates=None,
+def choose_calibration_file(requested=None, *, factory=None, candidates=None,
                             ask=input, out=print) -> Path:
-    """定下这次用哪份标定文件——**绝不回退到默认标定**。
-
-    两条路：
+    """定下这次用哪份标定文件。三档，**顺序就是优先级**。
 
     * ``--calib <路径>``（``requested``）：直接用，不提问；只做校验。
-    * 没给：列出候选让操作员当场选。非交互（stdin 不是 tty、EOF）或没有候选
-      就直接退出，**不会**去用 SDK 的默认路径，也不会回退出厂标定。
+    * ``factory`` 给了且读得出来：用 SDK 包里那份出厂标定，**不提问**，只打一行
+      说明。这是默认路径——``factory`` 由调用方用
+      :func:`factory_calibration_path` 算出来，所以它跟着包走，换电脑也一样。
+    * 出厂标定也读不出来（SDK 装得残缺、文件被删）：才回到选择器——列出候选让
+      操作员当场选；非交互（stdin 不是 tty、EOF）或没有候选就直接退出。
 
-    为什么这么严：标定的角度和毫米刻度是**每台夹爪单独量**的。SDK 的默认路径
-    只是「上次存的地方」，出厂那份是另一个尺寸的机器；两者都可能自洽到能通过
-    :func:`check_calibration`（那只查内部一致性），于是「忘了带 --calib」会一路
-    跑到使能电机，用别人的刻度算目标角。
+    出厂标定是**台架夹具的实测参数**，不是每台夹爪各自量的：它是一份能用的默认
+    值，不是「这台夹爪的标定」。要按这台夹爪自己的尺寸驱动，用 ``--calib`` 指
+    上位机保存的那份——所以第 2 档那行提示必须把这句话说出来，不能让人以为默认
+    值就是自己的标定。
 
     Args:
         requested: ``--calib`` 的值（``None`` = 没给）。
+        factory: 出厂标定文件的路径；``None`` 表示调用方拿不到 SDK，直接进选择器。
         candidates: 候选文件；默认 :func:`calibration_candidates`。
         ask: 取输入的函数（默认 ``input``）——测试注入用。
         out: 打印函数（默认 ``print``）——测试注入用。
@@ -601,15 +570,24 @@ def choose_calibration_file(requested=None, *, candidates=None,
         read_calibration_file(path)
         return path
 
+    if factory is not None:
+        path = Path(factory).expanduser()
+        try:
+            read_calibration_file(path)
+        except SystemExit:
+            pass          # 出厂文件不在/读不出来：落到下面的选择器，别把它当终局
+        else:
+            out(f"未指定 --calib：使用 SDK 自带的出厂标定 {path}")
+            out("   （台架夹具的实测参数，不是这台夹爪自己量的。"
+                "换 --calib <路径> 指这台夹爪的那份。）")
+            return path
+
     found = list(calibration_candidates() if candidates is None else candidates)
     listing = "".join(f"     {i}) {p}\n" for i, p in enumerate(found, 1))
     if not found:
         raise SystemExit(
-            f"没有指定标定文件，也没有找到候选（{CALIBRATIONS_DIR} 下没有 "
-            "*.json）。\n"
-            "   本样例**不接受** SDK 的默认标定/出厂标定：标定是每台夹爪单独量"
-            "的，\n"
-            "   用别台的刻度算目标角会顶到限位或根本夹不住。\n"
+            f"没有指定标定文件，SDK 自带的出厂标定也读不出来，"
+            f"候选里也没有（{CALIBRATIONS_DIR} 下没有 *.json）。\n"
             "   请先用上位机对着真机标定并保存：\n"
             "     litegrip-studio / litegrip-console（或 SDK 自带 "
             "tools/gui/litegrip_gui.py）\n"
@@ -620,7 +598,7 @@ def choose_calibration_file(requested=None, *, candidates=None,
         raise SystemExit(
             "需要先选定标定文件，但当前不是交互终端（stdin 不是 tty），"
             "没法让你选。\n"
-            "   本样例**不接受** SDK 的默认标定/出厂标定。\n"
+            "   SDK 自带的出厂标定也读不出来，所以没得默认。\n"
             "   脚本/非交互请显式指定：--calib <路径>\n"
             "   找到的候选：\n"
             + listing
@@ -628,7 +606,8 @@ def choose_calibration_file(requested=None, *, candidates=None,
               "litegrip-console）。"
         )
 
-    out("本样例要求先选定**这台夹爪**的标定文件（标定文件在上位机里标定后保存：\n"
+    out("SDK 自带的出厂标定读不出来，请选定**这台夹爪**的标定文件"
+        "（标定文件在上位机里标定后保存：\n"
         "litegrip-studio / litegrip-console，或 SDK 自带的 "
         "tools/gui/litegrip_gui.py）。")
     out("  找到这些候选：")
@@ -651,14 +630,12 @@ def choose_calibration_file(requested=None, *, candidates=None,
                          "回车/q 退出）: ").strip()
         except (EOFError, KeyboardInterrupt):
             raise SystemExit(
-                "没选标定文件就退出了——不会替你挑一份（默认标定/出厂标定都"
-                "不接受）。\n"
+                "没选标定文件就退出了——不会替你挑一份。\n"
                 "   下次直接指路径：--calib <路径>"
             )
         if not answer or answer.lower() in ("q", "quit", "exit"):
             raise SystemExit(
-                "没有选定标定文件——不会替你挑一份（默认标定/出厂标定都不"
-                "接受）。\n"
+                "没有选定标定文件——不会替你挑一份。\n"
                 "   下一步：在上位机里对这台夹爪标定并保存，再重跑；"
                 "或 --calib <路径>。"
             )
@@ -772,10 +749,10 @@ def _same_value(want, got) -> bool:
 def open_real_gripper(args: argparse.Namespace, enable: bool = True):
     """连接真机夹爪：选标定 → connect → 载入并核实标定 → enable。
 
-    标定在**连接之前**就定下来（:func:`choose_calibration_file`），并且必须是这台
-    夹爪的那一份——没有 ``--calib`` 就在终端里选，选不出来就退出。理由见那两个
-    函数：默认标定 + SDK 的静默出厂回退，合起来足以让一次「忘了带参数」变成拿
-    别人机器的尺寸下发指令。
+    标定在**连接之前**就定下来（:func:`choose_calibration_file`）：``--calib``
+    给的优先，没给就用 SDK 包里那份出厂标定，出厂文件也读不出来才在终端里选。
+    ``load_chosen_calibration`` 之后还会逐个字段核实「生效的确实是这一份」——
+    SDK 在文件读不出来时会**静默**改用出厂标定并照样返回 True，光看返回值不够。
 
     任一步失败都打印可读的原因并 ``SystemExit(1)``，不会抛裸异常。
 
@@ -790,7 +767,8 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
     litegrip = import_litegrip()
     check_sdk_api(litegrip)   # 缺公开接口就别连——宁可现在停，也别在循环里才发现
 
-    calib_path = choose_calibration_file(args.calib)
+    calib_path = choose_calibration_file(
+        args.calib, factory=factory_calibration_path(litegrip))
     calib = read_calibration_file(calib_path)
     # 文件记的是哪台夹爪：对不上就在碰总线之前停
     notes = check_calibration_matches_args(calib, channel=args.channel,
@@ -818,9 +796,9 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
         # 标定必须在 enable 之前载入：SDK 的毫米刻度依赖它
         load_chosen_calibration(gripper, calib_path, calib)
         if not enable:
-            # 只说「不发送运动指令」：--status 走这条路（未使能），但它之后会发
-            # 只读的 0xCC 询问帧把状态叫回来——那同样是 CAN 帧，说「一帧都不发」
-            # 就把话说大了。04 的 --passive 才是真的一帧不发，它自己会这么说。
+            # 只说「不发送运动指令」：--status 走这条路（未使能），但读寄存器仍要
+            # 发读请求帧，说「一帧都不发」就把话说大了。04 的 --passive 才是真的
+            # 一帧不发，它自己会这么说。
             print("[真机] 已连接、已载入并核实标定（未使能，不发送任何运动指令）")
             return gripper
         if not gripper.enable():
@@ -937,83 +915,47 @@ def rad_to_fraction(gripper, position_rad: float) -> float:
 #: 也是等 50 ms，这里对齐它。
 FRESH_WAIT_S = 0.05
 
-#: 只读路径（``--status``）等一帧的时间 [s]：那条路径没有别人的帧可等（不使能
-#: → 电机不主动发帧），得先发一帧**只读的** 0xCC 请它回话，所以给得比
-#: :data:`FRESH_WAIT_S` 宽。
+#: 只读路径（``--status``）等一帧的时间 [s]。那条路径上电机通常**没使能**，
+#: 不会主动发帧，所以等不到是常态而不是故障——等久一点只是给「别的程序刚放过帧」
+#: 留点余地，不是指望它一定回话。
 STATUS_WAIT_S = 0.5
 
 
-def request_status_frame(gripper, timeout_s: float = FRESH_WAIT_S) -> bool:
-    """请电机主动回一帧状态（``LiteGrip.refresh_status``：0xCC，**不改变输出**）。
+def fresh_state(gripper, timeout_s: float = FRESH_WAIT_S):
+    """等到一帧**新**的状态帧再读快照；等不到返回 ``None``。
 
-    SDK 把它做成了公开方法，而且它**自己就把等待做完了**：发一帧 0xCC 刷新请求，
-    然后等到真的收到一帧新的状态帧为止。所以这里只是把「传输层出错也算没有帧」
-    包住，让调用方拿到一个布尔值——**不再额外 poll**：同一个时间预算花两遍，等于
-    把主循环的最坏停顿翻倍。
+    这是本仓库读真机位置的正确入口（03/04/05 都用它）。判据只有一条：
 
-    为什么需要它：**没使能的电机不会自己发帧**，光 poll 永远等不到状态帧，于是
-    ``get_state()`` 返回的是 ``MotorState._position`` 的初值 ``0.0``——那不是
-    「夹爪在 0 弧度」，是「从没读到过」。只读诊断想看真实位置，就得主动要一帧
-    （实测：电机答 0xCC 时读到 −0.370 rad，而缓存说是 0.0）。
-
-    Args:
-        timeout_s: 最多等多久 [s]。默认沿用 :data:`FRESH_WAIT_S`，与
-            ``get_state(wait=True)`` 的 50 ms 对齐；``--status`` 那条路用
-            :data:`STATUS_WAIT_S`。
-
-    Returns:
-        True = ``timeout_s`` 内确实收到了一帧**新**状态帧。False = 没收到——电机
-        没答、总线出错，对调用方是同一件事：**拿不到新鲜读数，不许下发**。
-    """
-    try:
-        return bool(gripper.refresh_status(timeout_s=timeout_s))
-    except Exception:      # 传输层掉了等等：没有帧就是没有帧，别把调用方带崩
-        return False
-
-
-def fresh_state(gripper, timeout_s: float = FRESH_WAIT_S, *, request: bool = False):
-    """等到一帧**新**的状态帧再读缓存；等不到返回 ``None``。
-
-    这是本仓库读真机位置的正确入口（04/05 都用它）。「这份位置是不是*现在*的」
-    这件事，SDK 的公开接口里有**两个互补**的回答，这里两道门都过才算数：
-
-    * :meth:`LiteGrip.poll` —— True 表示「刚收到的这一帧是我们电机的状态帧」
-      （读寄存器的应答不算）。它回答「**刚**有没有帧」；
-    * ``GripperState.has_data`` / ``is_stale`` / ``data_age_s`` —— 这份快照到底
-      有没有被数据支撑。它回答「**这份快照**是不是量出来的」。
-
-    为什么要两道：``data_age_s`` 量的是「距上次**读到**帧」，时间戳在 SDK 的
-    transport 里打，滞留在接收队列里的旧帧读出来照样显得新鲜（SDK 自己把这条标了
-    「待查」）；而 ``poll`` 信任的是 SDK 对「状态帧」的判定。合起来才是「这一帧
-    是现在的」。
+    :meth:`LiteGrip.poll` 为真 ⟹ **这次调用里**解出了一帧本电机的状态帧
+    （SDK 自己会把读寄存器的参数应答帧排除掉），于是紧随其后的
+    ``get_state(wait=False)`` 读到的就是刚才那一帧。为假就是没有新帧，返回
+    ``None``。
 
     为什么非要问这一句：缓存里可能是 ``MotorState._position`` 的初值 ``0.0``，
     或者一个冻结的旧值。拿它当「现在的位置」去算目标角和斜坡时长，算出来的是一
-    条指向别处的**阶跃**指令——电机按标定里的 ``kp``（SDK 默认 100 Nm/rad）去追
-    一个不存在的误差，就是「一开夹爪就起飞」的形态。所以拿不到新鲜读数时，调用方
-    应当**拒绝下发**，而不是猜一个值。
+    条指向别处的**阶跃**指令——电机按标定里的 ``kp`` 去追一个不存在的误差，就是
+    「一开夹爪就起飞」的形态。所以拿不到新鲜读数时，调用方应当**拒绝下发**，而
+    不是猜一个值。
+
+    **不要再加第二道门。** 上一版这里还查 ``GripperState.has_data`` /
+    ``is_stale`` / ``data_age_s``（防「快照没有数据支撑」），这三个属性在现在用的
+    那份 SDK（nexform-tech/litegrip-python）里**不存在**，而且 ``poll`` 为真时
+    它们要防的两种情况——从没读过、读到的是冻结的旧值——本来就不成立。哪天 SDK
+    把「这份快照是不是量出来的」做成公开接口，再加回来。
+
+    电机**没使能**时它不会主动发帧，这里就会一直返回 ``None``（以前靠发一帧只读的
+    0xCC 把它叫醒，那条路已经去掉了）。所以未使能的读只路径必须把「读不到位置」
+    当成正常结果处理，不要报错——见 ``examples/05_dual_control.py`` 的 ``--status``。
 
     Args:
         timeout_s: 最多等多久 [s]。
-        request: 等之前先发一帧只读的 ``0xCC`` 请求并等它回，见
-            :func:`request_status_frame`——电机没在主动发帧时（未使能、或者
-            没人喂帧）才需要。这条路径**不再**额外 poll：``refresh_status`` 自己
-            就把这个预算花完了。
 
     Returns:
         ``GripperState``；``timeout_s`` 内没有新的状态帧则 ``None``。
     """
-    if request:
-        if not request_status_frame(gripper, timeout_s=timeout_s):
-            return None
-    elif not gripper.poll(timeout_s=timeout_s):
+    if not gripper.poll(timeout_s=timeout_s):
         return None
-    state = gripper.get_state(wait=False)
-    if not state.has_data or state.is_stale:
-        # 来了帧，但这份快照不是「现在」的（从没被数据支撑过，或者已经过期）。
-        # 少发一帧不会让电机乱动，拿它算目标会。
-        return None
-    return state
+    return gripper.get_state(wait=False)
 
 
 def status_line(

@@ -324,9 +324,9 @@ def _run(monkeypatch, gripper=None, steps=200, mode="record", record=0.1,
         return gripper
 
     monkeypatch.setattr(ex03, "parse_args", lambda: args)
-    monkeypatch.setattr(ex03, "import_trajectory_litegrip",
+    monkeypatch.setattr(ex03, "import_litegrip",
                         lambda: fake_sdk(sdk_trajectory))
-    monkeypatch.setattr(ex03, "check_trajectory_sdk_api", lambda sdk: None)
+    monkeypatch.setattr(ex03, "check_sdk_api", lambda sdk: None)
     monkeypatch.setattr(ex03, "open_gripper", fake_open)
     monkeypatch.setattr(ex03, "GripperSim", lambda **kw: sim)
     monkeypatch.setattr(ex03, "time", SimpleNamespace(

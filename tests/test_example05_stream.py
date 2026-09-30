@@ -71,17 +71,12 @@ class RecordingGripper:
         self.ok = ok
         self.position_rad = OPEN_RAD
         #: False = this motor is not sending status frames, so nothing it says
-        #: about where it is can be trusted (both ``LiteGrip.poll`` and
-        #: ``refresh_status`` answer that question).
+        #: about where it is can be trusted (``LiteGrip.poll`` answers that
+        #: question, and it is the only thing that does).
         self.answering = answering
-        self.refreshes: list[float] = []
         self.config = _config().config
 
     def poll(self, timeout_s: float = 0.0) -> bool:
-        return self.answering
-
-    def refresh_status(self, timeout_s: float = 0.5) -> bool:
-        self.refreshes.append(timeout_s)
         return self.answering
 
     def send_mit_frame(self, q, kp, kd, dq=0.0, tau=0.0) -> bool:
@@ -91,8 +86,7 @@ class RecordingGripper:
     def get_state(self, wait: bool = True):
         return SimpleNamespace(position_rad=self.position_rad, force_n=0.0,
                                position_mm=0.0, is_moving=False,
-                               error_code=1, is_error=False,
-                               data_age_s=0.0, has_data=True, is_stale=False)
+                               error_code=1, is_error=False)
 
 
 def _config(**overrides):

@@ -295,18 +295,76 @@ class TestCalibrationConfig:
 class TestChoosingCalibration:
     """Which calibration file this run uses is a *decision*, made every time.
 
-    The SDK's default path is "wherever the last calibration was saved" and its
-    ``load_calibration`` silently falls back to the shipped factory file when the
-    path it was given cannot be read.  Neither is this gripper's geometry, so
-    neither is an acceptable answer to "which angles should I command from?".
+    Three tiers, and the order is the priority: ``--calib``, then the factory
+    file shipped inside the SDK package, then — only if even that cannot be
+    read — the interactive picker.
+
+    The factory file is a usable default, not this gripper's calibration: it is
+    the geometry of the bench fixture.  That is why the tier exists at all (a
+    fresh machine runs without a calibration hunt) and why it must say out loud
+    what it is.
     """
 
     def test_an_explicit_path_is_used_without_asking(self, tmp_path, monkeypatch):
         wanted = _calib_file(tmp_path / "mine.json")
+        factory = _calib_file(tmp_path / "factory_calibration.json")
         _interactive(monkeypatch, False)      # 非交互也不该妨碍显式指定
         chosen = _common.choose_calibration_file(
-            str(wanted), ask=lambda prompt: pytest.fail("不该提问"))
+            str(wanted), factory=factory,
+            ask=lambda prompt: pytest.fail("不该提问"))
         assert chosen == wanted
+
+    def test_the_factory_file_is_the_default_and_says_what_it_is(
+            self, tmp_path):
+        """No ``--calib`` on a fresh machine: the run proceeds instead of asking
+        an operator who may not be there.  It must still say the numbers are the
+        bench fixture's."""
+        factory = _calib_file(tmp_path / "factory_calibration.json")
+        printed: list[str] = []
+        chosen = _common.choose_calibration_file(
+            None, factory=factory, candidates=[],
+            ask=lambda prompt: pytest.fail("有出厂标定还提问"),
+            out=printed.append)
+        assert chosen == factory
+        listing = "\n".join(printed)
+        assert "出厂标定" in listing
+        assert "--calib" in listing, "没说这台夹爪自己的标定怎么指"
+
+    def test_an_unreadable_factory_file_falls_back_to_the_picker(
+            self, tmp_path, monkeypatch):
+        """A factory file that cannot be read is not the end of the run -- it
+        means the SDK install is incomplete, and the operator can still point at
+        the right file."""
+        real = _calib_file(tmp_path / "litegrip_calibration.json")
+        _interactive(monkeypatch, True)
+        chosen = _common.choose_calibration_file(
+            None, factory=tmp_path / "gone.json", candidates=[real],
+            ask=lambda prompt: "1", out=lambda text: None)
+        assert chosen == real
+
+    def test_a_corrupt_factory_file_also_falls_back(self, tmp_path, monkeypatch):
+        """Parsing failure, not just a missing file: the SDK package could ship
+        a truncated one, and refusing to start over that would be worse than
+        asking."""
+        bad = tmp_path / "factory_calibration.json"
+        bad.write_text("{ not json", encoding="utf-8")
+        real = _calib_file(tmp_path / "litegrip_calibration.json")
+        _interactive(monkeypatch, True)
+        chosen = _common.choose_calibration_file(
+            None, factory=bad, candidates=[real],
+            ask=lambda prompt: "1", out=lambda text: None)
+        assert chosen == real
+
+    def test_the_picker_still_refuses_when_the_factory_file_is_unreadable(
+            self, tmp_path, monkeypatch):
+        """Tier three keeps every refusal it had: a candidate the operator
+        declines is still a stop, not a silent default."""
+        real = _calib_file(tmp_path / "litegrip_calibration.json")
+        _interactive(monkeypatch, True)
+        with pytest.raises(SystemExit):
+            _common.choose_calibration_file(
+                None, factory=tmp_path / "gone.json", candidates=[real],
+                ask=lambda prompt: "q", out=lambda text: None)
 
     def test_the_candidates_leave_out_the_simulator_and_the_backups(
             self, tmp_path):
@@ -610,29 +668,13 @@ class TestRadToFraction:
 
 
 class FakeGrip:
-    """Just the ``LiteGrip`` surface the ``_common`` helpers use.
+    """Just the ``LiteGrip`` surface the ``_common`` helpers use."""
 
-    ``data_age_s`` is the SDK's public freshness signal (``inf`` = no frame has
-    ever been decoded); the two properties are derived from it exactly as the
-    SDK derives them, so a test can put the snapshot on either side of
-    ``STALE_AFTER_S`` by choosing one number.
-    """
-
-    #: ``litegrip.models.STALE_AFTER_S``: older than this reads as stale.
-    STALE_AFTER_S = 0.5
-
-    def __init__(self, answering: bool = True,
-                 data_age_s: float = 0.0) -> None:
+    def __init__(self, answering: bool = True) -> None:
         self.answering = answering
-        self.data_age_s = data_age_s
-        self.refreshes: list[float] = []
         self.polls: list[float] = []
         self.reads = 0
         self.frames: list[dict] = []
-
-    def refresh_status(self, timeout_s: float = 0.5) -> bool:
-        self.refreshes.append(timeout_s)
-        return self.answering
 
     def poll(self, timeout_s: float = 0.0) -> bool:
         self.polls.append(timeout_s)
@@ -640,12 +682,7 @@ class FakeGrip:
 
     def get_state(self, wait: bool = True):
         self.reads += 1
-        return SimpleNamespace(
-            position_rad=0.42,
-            data_age_s=self.data_age_s,
-            has_data=self.data_age_s != float("inf"),
-            is_stale=self.data_age_s > self.STALE_AFTER_S,
-        )
+        return SimpleNamespace(position_rad=0.42)
 
     def send_mit_frame(self, q, kp, kd, dq=0.0, tau=0.0) -> bool:
         """Any control frame is recorded, so a read-only path can prove it sent
@@ -657,9 +694,18 @@ class FakeGrip:
 class TestFreshState:
     """``fresh_state`` is the only sanctioned way to read the real position.
 
-    Two public signals have to agree before the cached position counts as a
-    reading: ``poll()`` says a status frame arrived *just now*, and the
-    snapshot's own ``has_data`` / ``is_stale`` say it is backed by data.
+    It has exactly one gate: ``poll()``.  The SDK returns ``True`` only when a
+    status frame **for our motor** was decoded during that call — it discards
+    parameter-reply frames — so a ``True`` means the snapshot read immediately
+    afterwards is the frame that just arrived.  Nothing else is checked, and
+    nothing else has to be: the failure mode this path exists to stop is a
+    cached ``MotorState._position = 0.0`` being commanded as if it were a
+    measurement, and that cannot be what ``get_state`` returns right after a
+    genuine frame.
+
+    Do not add a second gate.  The previous version also consulted
+    ``GripperState.has_data`` / ``is_stale`` / ``data_age_s``, which do not
+    exist in the SDK these examples use (nexform-tech/litegrip-python).
     """
 
     def test_a_fresh_frame_returns_the_state(self):
@@ -670,63 +716,27 @@ class TestFreshState:
         assert gripper.polls == [0.25]
 
     def test_no_frame_returns_none_without_reading_the_cache(self):
-        """A cache known to be stale must not be read at all — reading it is how
-        a frozen value gets mistaken for a measurement."""
+        """A cache with nothing behind it must not be read at all — reading it
+        is how ``0.0`` gets mistaken for a measurement."""
         gripper = FakeGrip(answering=False)
         assert _common.fresh_state(gripper) is None
         assert gripper.reads == 0, "等不到帧还去读了缓存"
 
-    def test_it_can_wake_the_motor_up_first(self):
-        """A motor that is not being fed never speaks; 0xCC asks it to."""
-        gripper = FakeGrip()
-        _common.fresh_state(gripper, timeout_s=1.0, request=True)
-        assert gripper.refreshes == [1.0]
-        assert gripper.reads == 1
+    def test_the_poll_result_is_the_whole_verdict(self):
+        """Whatever ``poll`` says is what comes back — no third opinion.
 
-    def test_waking_the_motor_up_does_not_spend_the_budget_twice(self):
-        """``refresh_status`` does its own waiting; polling again afterwards
-        would double the worst-case stall of every caller that asks for a
-        frame."""
-        gripper = FakeGrip()
-        _common.fresh_state(gripper, request=True)
-        assert gripper.polls == [], "叫醒电机之后又 poll 了一次"
+        A caller that wants to refuse a reading has to get ``None`` out of
+        this, and the only thing that produces ``None`` is a failed poll.
+        """
+        assert _common.fresh_state(FakeGrip()) is not None
+        assert _common.fresh_state(FakeGrip(answering=False)) is None
 
-    def test_the_wake_up_call_is_read_only(self):
-        """``refresh_status`` is documented "does not change motor output" — no
-        control frame may be sent on the way to asking for one."""
-        gripper = FakeGrip()
-        _common.fresh_state(gripper, request=True)
-        assert gripper.refreshes and gripper.frames == []
-
-    def test_no_request_is_sent_unless_asked_for(self):
+    def test_it_sends_no_control_frame_on_the_way(self):
+        """Reading a position is not moving the motor: no MIT frame may go out
+        while asking for one."""
         gripper = FakeGrip()
         _common.fresh_state(gripper)
-        assert gripper.refreshes == []
-
-    def test_a_frame_the_sdk_calls_stale_is_refused(self):
-        """``poll`` said a frame arrived, but the snapshot says it is old — the
-        two disagree, and the reading must lose."""
-        gripper = FakeGrip(data_age_s=FakeGrip.STALE_AFTER_S + 0.1)
-        assert _common.fresh_state(gripper) is None
-        assert gripper.reads == 1, "该读的还是读了，只是没敢用"
-
-    def test_a_snapshot_with_no_data_behind_it_is_refused(self):
-        """``inf`` is the SDK's "never received a frame" — the same
-        ``MotorState._position = 0.0`` that this whole path exists to stop from
-        being commanded."""
-        gripper = FakeGrip(data_age_s=float("inf"))
-        assert _common.fresh_state(gripper) is None
-
-    def test_a_failing_transport_is_not_fatal(self):
-        """A CAN error must read as "no frame", never as "here is the cache"."""
-        class Exploding(FakeGrip):
-            def refresh_status(self, timeout_s: float = 0.5) -> bool:
-                raise OSError("CAN 掉线了")
-
-        gripper = Exploding()
-        assert _common.request_status_frame(gripper) is False
-        assert _common.fresh_state(gripper, request=True) is None
-        assert gripper.reads == 0, "传输层出错之后还是把缓存当读数了"
+        assert gripper.frames == []
 
 
 def _sdk(*absent: str) -> SimpleNamespace:
@@ -735,26 +745,34 @@ def _sdk(*absent: str) -> SimpleNamespace:
     Built fresh on every call out of exactly the members the check looks for:
     the check is a ``hasattr`` walk, so an absent one has to be genuinely
     absent, and deleting it off a shared class would leak into other tests.
+
+    Two spellings come out of :data:`_common.REQUIRED_SDK_API`: ``Owner.attr``
+    lands on a namespace named after the owner, and a bare name (``litegrip``'s
+    module-level ``trajectory_dir``) lands on the module itself.
     """
     drop = set(absent)
-    grip: dict = {}
-    state: dict = {}
+    owners: dict[str, dict] = {}
+    top: dict = {}
     for path, _why in _common.REQUIRED_SDK_API:
         if path in drop:
             continue
-        owner, _, attr = path.partition(".")
-        (grip if owner == "LiteGrip" else state)[attr] = True
-    return SimpleNamespace(LiteGrip=SimpleNamespace(**grip),
-                           GripperState=SimpleNamespace(**state))
+        owner, sep, attr = path.partition(".")
+        if sep:
+            owners.setdefault(owner, {})[attr] = True
+        else:
+            top[owner] = True
+    return SimpleNamespace(**top,
+                           **{name: SimpleNamespace(**members)
+                              for name, members in owners.items()})
 
 
 class TestSdkApiCheck:
-    """The examples refuse to run on an SDK that cannot answer "is this reading
-    current?" — loudly, at startup, naming the member and where to get one.
+    """The examples refuse to run on an SDK missing any public interface they
+    call — loudly, at startup, naming the member and where to get one.
 
-    Silently degrading is what the previous version did (it borrowed
-    ``gripper._can._controller``), and a guess about a measured position is the
-    input to a step command.
+    All three hardware examples resolve the same checkout now, so there is one
+    list.  The failure this stops is an ``AttributeError`` thrown from inside
+    the frame loop, after the motor is already enabled.
     """
 
     def test_a_complete_sdk_passes(self):
@@ -768,84 +786,31 @@ class TestSdkApiCheck:
             path for path, _ in _common.REQUIRED_SDK_API]
 
     @pytest.mark.parametrize("absent", [
-        "LiteGrip.refresh_status",
-        "GripperState.data_age_s",
-        "GripperState.has_data",
-        "GripperState.is_stale",
+        "LiteGrip.record_start",
+        "LiteGrip.poll",
+        "Trajectory.load",
+        "trajectory_dir",
+        "GripperState.position_rad",
     ])
     def test_one_missing_member_is_reported_alone(self, absent):
         assert _common.missing_sdk_api(_sdk(absent)) == [absent]
 
+    def test_a_bare_module_level_name_is_checked(self):
+        """``trajectory_dir`` has no dot in it, so the hasattr walk must not
+        take it for an owner with an empty attribute — that would read as
+        "always absent" and refuse every SDK."""
+        assert "trajectory_dir" not in _common.missing_sdk_api(_sdk())
+        assert "trajectory_dir" in _common.missing_sdk_api(_sdk("trajectory_dir"))
+
     def test_it_says_which_sdk_to_use(self):
         with pytest.raises(SystemExit) as excinfo:
-            _common.check_sdk_api(_sdk("LiteGrip.refresh_status"))
-        message = str(excinfo.value)
-        assert "LiteGrip.refresh_status" in message
-        assert "PyPI" in message, "没说明这个包不在 PyPI 上，用户会去 pip install"
-        assert "LITEGRIP_SDK_DIR" in message
-        assert "pip install -e" in message
-
-
-def _traj_sdk(*absent: str) -> SimpleNamespace:
-    """A stand-in for the *trajectory* SDK, lacking the named members.
-
-    Built the same way as :func:`_sdk`, off ``TRAJECTORY_SDK_API``.  The two
-    lists describe two different packages that happen to share a name, so the
-    two helpers must not be interchangeable.
-    """
-    drop = set(absent)
-    owners: dict = {"LiteGrip": {}, "Trajectory": {}}
-    for path, _why in _common.TRAJECTORY_SDK_API:
-        if path in drop:
-            continue
-        owner, _, attr = path.partition(".")
-        owners[owner][attr] = True
-    return SimpleNamespace(**{name: SimpleNamespace(**members)
-                              for name, members in owners.items()})
-
-
-class TestTrajectorySdkApiCheck:
-    """03 refuses to run on the SDK that 04/05 use — loudly, at startup, naming
-    the missing member and which checkout has it.
-
-    There is no degraded path here: the recording loop and the replay loop are
-    both the SDK's own background threads, timed to its own clock.  Hand-rolling
-    either out of ``send_mit_frame`` would produce samples on a different beat
-    than they were taken on, so the example stops instead.
-    """
-
-    def test_a_complete_sdk_passes(self):
-        sdk = _traj_sdk()
-        assert _common.missing_trajectory_sdk_api(sdk) == []
-        _common.check_trajectory_sdk_api(sdk)       # must not raise
-
-    def test_every_missing_member_is_named(self):
-        sdk = _traj_sdk(*[path for path, _ in _common.TRAJECTORY_SDK_API])
-        assert _common.missing_trajectory_sdk_api(sdk) == [
-            path for path, _ in _common.TRAJECTORY_SDK_API]
-
-    @pytest.mark.parametrize("absent",
-                             [path for path, _ in _common.TRAJECTORY_SDK_API])
-    def test_one_missing_member_is_reported_alone(self, absent):
-        assert _common.missing_trajectory_sdk_api(_traj_sdk(absent)) == [absent]
-
-    def test_it_says_which_checkout_to_point_at(self, monkeypatch):
-        monkeypatch.delenv("LITEGRIP_TRAJ_SDK_DIR", raising=False)
-        with pytest.raises(SystemExit) as excinfo:
-            _common.check_trajectory_sdk_api(_traj_sdk("LiteGrip.record_start"))
+            _common.check_sdk_api(_sdk("LiteGrip.record_start"))
         message = str(excinfo.value)
         assert "LiteGrip.record_start" in message
-        assert "LITEGRIP_TRAJ_SDK_DIR" in message
+        assert "PyPI" in message, "没说明这个包不在 PyPI 上，用户会去 pip install"
+        assert "LITEGRIP_SDK_DIR" in message
         assert "litegrip-python" in message
-        # ...and says which SDK the reader probably has, or "install the other
-        # one" reads as "your install is broken".
-        assert "refresh_status" in message
-
-    def test_the_two_sdks_are_not_interchangeable(self):
-        """Each check must fail on the other's package.  If either passed on
-        both, the wrong-SDK failure would be silent again."""
-        assert _common.missing_trajectory_sdk_api(_sdk()) != []
-        assert _common.missing_sdk_api(_traj_sdk()) != []
+        assert "pip install -e" in message
 
 
 class TestStatusLine:
@@ -903,17 +868,18 @@ class TestArgParsers:
         assert args.channel == "can0"
         assert args.can_id == 0x08
         assert args.mst_id == 0x18
-        # ``None`` only means "not given on the command line": it is not a
-        # request for the SDK's default calibration.  ``choose_calibration_file``
-        # then asks, or refuses -- it never resolves ``None`` to a file.
+        # ``None`` means "not given on the command line".  It is not a path:
+        # ``choose_calibration_file`` turns it into the SDK's factory
+        # calibration, and only asks when even that cannot be read.
         assert args.calib is None
 
-    def test_the_calib_flag_is_documented_as_mandatory(self):
+    def test_the_calib_flag_documents_the_factory_default(self):
         parser = argparse.ArgumentParser()
         _common.add_hardware_args(parser)
         help_text = parser.format_help()
         assert "--calib" in help_text
-        assert "上位机" in help_text, "没说标定文件从哪来"
+        assert "litegrip-studio" in help_text, "没说标定文件从哪来"
+        assert "出厂标定" in help_text, "没说默认用哪份"
 
     def test_hardware_args_accept_hex_and_decimal(self):
         parser = argparse.ArgumentParser()
@@ -927,50 +893,49 @@ class TestArgParsers:
         assert "Esc" in _common.SAFETY_BANNER
 
 
-class TestTrajectorySdkDiscovery:
-    """03 finds its SDK the same way 01-02 find theirs, on its own variable.
+class TestFactoryCalibrationPath:
+    """The factory default has to resolve through the package, never through a
+    path baked into this repository.
 
-    Two variables, not one: ``LITEGRIP_SDK_DIR`` is the first thing
-    :func:`_common.sdk_dir` looks at, so pointing it at the trajectory checkout
-    would drag 04/05 over too — and they stop at startup there, because that
-    package has no ``refresh_status``.
+    A hard-coded ``/home/<someone>/...`` would work on the machine it was
+    written on and nowhere else — a different laptop, a different virtualenv or
+    a different checkout all move the file.  Resolving off ``litegrip.__file__``
+    is what makes "the default is the SDK's own factory calibration" true
+    everywhere.
     """
 
-    def test_its_own_env_var_wins(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("LITEGRIP_TRAJ_SDK_DIR", str(tmp_path))
-        assert _common.trajectory_sdk_dir() == tmp_path
+    def test_it_follows_the_package_directory(self, tmp_path):
+        package = tmp_path / "site-packages" / "litegrip"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        sdk = SimpleNamespace(**{"__file__": str(package / "__init__.py")})
+        found = _common.factory_calibration_path(sdk)
+        assert found == package / "factory_calibration.json"
+        assert tmp_path in found.parents, "跑到包目录外面去了"
 
-    def test_it_ignores_the_other_variable(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("LITEGRIP_SDK_DIR", str(tmp_path))
-        monkeypatch.delenv("LITEGRIP_TRAJ_SDK_DIR", raising=False)
-        assert _common.trajectory_sdk_dir() != tmp_path
-
-    def test_the_other_variable_does_not_move_the_freshness_sdk(self, monkeypatch,
-                                                               tmp_path):
-        monkeypatch.setenv("LITEGRIP_TRAJ_SDK_DIR", str(tmp_path))
-        monkeypatch.delenv("LITEGRIP_SDK_DIR", raising=False)
-        assert _common.sdk_dir() != tmp_path
-
-    def test_a_discovered_checkout_holds_the_package(self, monkeypatch):
-        """Whatever comes back when nothing overrides it has to be usable: a
-        directory without ``litegrip/__init__.py`` in it would send the import
-        straight back to the other SDK."""
-        monkeypatch.delenv("LITEGRIP_TRAJ_SDK_DIR", raising=False)
-        found = _common.trajectory_sdk_dir()
-        assert found is None or Path(found).is_dir()
-        if found is not None:
-            assert (Path(found) / "litegrip" / "__init__.py").is_file()
+    def test_the_real_sdk_ships_one(self):
+        """Whatever SDK the examples would actually load has to carry the file
+        the default points at -- otherwise every run falls through to the
+        picker and the default is a lie."""
+        try:
+            litegrip = _common.import_litegrip()
+        except SystemExit as exc:
+            pytest.skip(f"这台机器上没有真机 SDK：{exc}")
+        path = _common.factory_calibration_path(litegrip)
+        assert path.is_file(), f"{path} 不存在"
+        calib = _common.read_calibration_file(path)
+        assert float(calib["rad_to_mm"]) > 0
 
 
-class TestLoadingTheOtherCheckout:
-    """Two packages named ``litegrip`` on one machine, and 03 must get the right
-    one.
+class TestSdkDiscovery:
+    """One checkout, one variable, for all three hardware examples.
 
-    ``pip install -e`` registers a meta path finder whose priority sits above
-    ``sys.path``, so ``sys.path.insert(0, trajectory_checkout)`` changes nothing
-    — the import still resolves to the installed one.  Loading by directory is
-    the only thing that works, which is why :func:`_common._load_package_from`
-    exists rather than a ``sys.path`` tweak.
+    ``litegrip`` also exists as an editable install on this machine, from a
+    different repository that has no trajectory API — and both report
+    ``__version__ 2.2.0``, so the version number cannot tell them apart.  The
+    sibling checkout therefore outranks the installed one: it is right there,
+    its name says which repository it is, and the name the examples want is
+    ``litegrip-python``.
     """
 
     @pytest.fixture
@@ -1006,8 +971,42 @@ class TestLoadingTheOtherCheckout:
             "MARKER = 'loaded from the directory'\n", encoding="utf-8")
         return tmp_path
 
+    def test_env_var_wins(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("LITEGRIP_SDK_DIR", str(tmp_path))
+        assert _common.sdk_dir() == tmp_path
+
+    def test_discovers_a_real_sdk_if_one_is_around(self, monkeypatch):
+        """When nothing overrides it, whatever comes back must actually exist."""
+        monkeypatch.delenv("LITEGRIP_SDK_DIR", raising=False)
+        found = _common.sdk_dir()
+        assert found is None or Path(found).exists()
+
+    def test_a_discovered_checkout_holds_the_package(self, monkeypatch):
+        """Whatever comes back has to be usable: a directory without
+        ``litegrip/__init__.py`` in it would send the import back to the
+        installed package."""
+        monkeypatch.delenv("LITEGRIP_SDK_DIR", raising=False)
+        found = _common.sdk_dir()
+        assert found is None or (Path(found) / "litegrip" / "__init__.py").is_file()
+
+    def test_the_sibling_checkout_outranks_the_installed_package(self, monkeypatch,
+                                                                tmp_path):
+        """The order is the point: on this machine ``litegrip`` is installed
+        editable from a repository that has no trajectory API, so falling back
+        to "whatever imports" would point example 03 at the wrong package."""
+        sibling = tmp_path / "litegrip-python"
+        (sibling / "src" / "litegrip").mkdir(parents=True)
+        (sibling / "src" / "litegrip" / "__init__.py").write_text(
+            "", encoding="utf-8")
+        monkeypatch.delenv("LITEGRIP_SDK_DIR", raising=False)
+        monkeypatch.setattr(_common, "_REPO_ROOT", tmp_path / "repo")
+        assert _common.sdk_dir() == sibling / "src"
+
     def test_it_loads_the_package_in_the_given_directory(self, throwaway,
                                                          clean_litegrip):
+        """``pip install -e`` registers a meta path finder above ``sys.path``,
+        so inserting the directory cannot win — the package has to be loaded
+        explicitly, which is why :func:`_common._load_package_from` exists."""
         module = _common._load_package_from(throwaway)
         assert module is not None
         assert module.MARKER == "loaded from the directory"
@@ -1019,38 +1018,26 @@ class TestLoadingTheOtherCheckout:
 
     def test_the_env_var_is_what_the_import_follows(self, monkeypatch, throwaway,
                                                     clean_litegrip):
-        """End to end: the variable 03 documents is the one the loader obeys,
-        even on a machine where the other SDK is installed and importable."""
-        monkeypatch.setenv("LITEGRIP_TRAJ_SDK_DIR", str(throwaway))
-        assert _common.import_trajectory_litegrip().MARKER == \
-            "loaded from the directory"
+        """End to end: the variable the examples document is the one the loader
+        obeys, even on a machine where the other SDK is installed and
+        importable."""
+        monkeypatch.setenv("LITEGRIP_SDK_DIR", str(throwaway))
+        assert _common.import_litegrip().MARKER == "loaded from the directory"
 
     def test_a_broken_checkout_is_reported_rather_than_skipped(self, monkeypatch,
                                                                tmp_path,
                                                                clean_litegrip):
         """A checkout that fails to load must say so.  Falling through to the
-        installed SDK would run 03 against the wrong package and blame it for
-        the missing API."""
+        installed SDK would run the examples against the wrong package and
+        blame it for the missing API."""
         package = tmp_path / "litegrip"
         package.mkdir()
         (package / "__init__.py").write_text("this is not python(\n",
                                              encoding="utf-8")
-        monkeypatch.setenv("LITEGRIP_TRAJ_SDK_DIR", str(tmp_path))
-        with pytest.raises(SystemExit) as excinfo:
-            _common.import_trajectory_litegrip()
-        assert str(tmp_path) in str(excinfo.value)
-
-
-class TestSdkDiscovery:
-    def test_env_var_wins(self, monkeypatch, tmp_path):
         monkeypatch.setenv("LITEGRIP_SDK_DIR", str(tmp_path))
-        assert _common.sdk_dir() == tmp_path
-
-    def test_discovers_a_real_sdk_if_one_is_around(self, monkeypatch):
-        """When nothing overrides it, whatever comes back must actually exist."""
-        monkeypatch.delenv("LITEGRIP_SDK_DIR", raising=False)
-        found = _common.sdk_dir()
-        assert found is None or Path(found).exists()
+        with pytest.raises(SystemExit) as excinfo:
+            _common.import_litegrip()
+        assert str(tmp_path) in str(excinfo.value)
 
     def test_bootstrap_makes_the_library_importable(self):
         _common.bootstrap_src()

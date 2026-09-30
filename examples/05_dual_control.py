@@ -21,13 +21,17 @@
 
 前提:
   1. 真机接在 CAN 总线上（默认 can0，用 --channel 换）
-  2. 装了本仓库要的 litegrip SDK（没有发布到 PyPI，从源码装）:
-       pip install -e /path/to/lite-grip
-  3. 先选定这台夹爪的标定文件。标定文件由上位机标定后保存得到：
+  2. 装了本仓库要的 litegrip SDK（没有发布到 PyPI，从源码装；三个真机样例用的是
+     同一份，nexform-tech/litegrip-python）:
+       pip install -e /path/to/litegrip-python
+     或 export LITEGRIP_SDK_DIR=/path/to/litegrip-python/src
+     或把 litegrip-python 仓库克隆到本仓库的同级目录
+  3. 一份可用的标定。标定文件由上位机标定后保存得到：
        litegrip-studio / litegrip-console，或 SDK 自带的 tools/gui/litegrip_gui.py
-     不给 --calib 就会在终端里列出候选让你选；选不出来（非交互、没有候选）直接
-     退出——**不会**去用 SDK 的默认标定，更不会回退出厂标定。标定的角度和毫米刻度
-     是一台机器一个值，拿别人的算目标角，轻则夹不住、重则一条指令撞限位。
+     标定的角度和毫米刻度是一台机器一个值，拿别人的算目标角，轻则夹不住、重则一条
+     指令撞限位。所以优先用 ``--calib`` 指**这台夹爪**自己那份；不给就用 SDK 包里
+     那份出厂标定（台架夹具的实测参数），出厂文件也读不出来才会在终端里列出候选让
+     你选；选不出来（非交互、没有候选）直接退出。
      --dry-run 也要选：它虽然不碰 CAN，但走的就是这套参数。
   4. 有可用的显示：三个滑条只在 GUI 连接下建得出来（--status 不用窗口，也不需要）
 
@@ -39,7 +43,7 @@ dry-run：
 
 真机「能读不能控」怎么办（位置读得到、发指令不动、驱动板红灯闪）：
 
-    python3 examples/05_dual_control.py --status             # 只连、只读，不发一帧
+    python3 examples/05_dual_control.py --status             # 只连、只读，不发运动指令
     python3 examples/05_dual_control.py --status --clear-fault   # 清掉锁死的故障
 
 红灯闪 + 位置照读 + 指令无效，是电机进了**锁死**的故障态，而 --status 打的那个
@@ -60,11 +64,11 @@ dry-run：
 公开出来的用途（自定义控制循环，自己管时序）。
 
 运行:
-  python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
-  python3 examples/05_dual_control.py                # 不给就当场从候选里选
+  python3 examples/05_dual_control.py --calib /path/to/这台夹爪的标定.json
+  python3 examples/05_dual_control.py                # 不给就用 SDK 出厂标定
   python3 examples/05_dual_control.py --force 20 --speed 40
   python3 examples/05_dual_control.py --channel can1        # 换 CAN 口
-  python3 examples/05_dual_control.py --status              # 只连、只读，不发一帧
+  python3 examples/05_dual_control.py --status              # 只连、只读，不发运动指令
 """
 import argparse
 import math
@@ -83,6 +87,7 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     calibration_summary,
     check_calibration_values,
     choose_calibration_file,
+    factory_calibration_path,
     fraction_to_target_rad,
     fresh_state,
     import_litegrip,
@@ -384,7 +389,7 @@ def fault_of(state):
     return f"{describe_code(state.error_code)} (0x{state.error_code:X})"
 
 
-def hold_frame(gripper, request=False):
+def hold_frame(gripper):
     """「锁在当前位置」的一帧：``(q, kp, kd, dq, tau)``；读不到就返回 ``None``。
 
     目标就是电机**现在**的位置、零速度、零前馈——命令出来的一瞬间误差为零，所以
@@ -399,13 +404,11 @@ def hold_frame(gripper, request=False):
     ``kp``（SDK 默认 100 Nm/rad）去追那个根本不存在的误差。少发一帧不会让电机乱
     动，发错目标会，所以读不到就返回 ``None``，调用方负责不发。
 
-    Args:
-        request: 等之前先发一帧 READ-ONLY 的 ``0xCC`` 状态请求（见
-            ``_common.request_status_frame``）——电机不会自己发状态帧，不喂它就不
-            回话，所以「读到之前什么都不发」会自己把自己饿死。0xCC 不带任何位置/
-            力矩目标，是这里唯一能既不发控制帧、又让电机开口的招。
+    本函数**不会**去催电机开口（旧版发过一帧只读的 ``0xCC`` 状态请求，那条路已经
+    去掉）。所以调用它的地方必须是**已使能**的电机——使能态的 DM 电机自己会持续
+    发状态帧，等一下就有；未使能的电机不发帧，这里只会一直返回 ``None``。
     """
-    state = fresh_state(gripper, request=request)
+    state = fresh_state(gripper)
     if state is None:
         return None
     cfg = gripper.config
@@ -433,7 +436,7 @@ class IdleKeeper:
 
     def __init__(self, gripper, hz=IDLE_HZ):
         self.gripper = gripper
-        self.frame = hold_frame(gripper, request=True)   # None = 还没读到可信位置
+        self.frame = hold_frame(gripper)   # None = 还没读到可信位置
         # 记住的这一帧是不是收拢指令——只有收拢才允许带夹持力（见
         # ``SliderDrive.retarget``）。锁位帧不含运动，所以是 False。
         self.closing = False
@@ -469,10 +472,9 @@ class IdleKeeper:
         if now - self.last_sent < self.interval:
             return None
         if self.frame is None:
-            # 还没有一个可信的目标——宁可这一拍不发，也不拿缓存的伪值现造一帧。但
-            # 不能干等：电机不会自己发状态帧，等下去就是一直等。所以带上一帧只读的
-            # 0xCC 请求把它叫醒，下一拍就有位置可锁了。
-            self.frame = hold_frame(self.gripper, request=True)
+            # 还没有一个可信的目标——宁可这一拍不发，也不拿缓存的伪值现造一帧。
+            # 电机是使能态，自己会持续发状态帧，下一拍读到了就开始发锁位帧。
+            self.frame = hold_frame(self.gripper)
             if self.frame is None:
                 self.starved += 1
                 return False
@@ -497,7 +499,7 @@ def make_sliders(gripper, *, live, default_force_n, default_speed_pct):
     """
     start_fraction = 1.0
     if live:
-        state = fresh_state(gripper, request=True)   # 刚使能，先把它叫醒再读
+        state = fresh_state(gripper)   # 使能后电机自己会发帧，等一帧就好
         if state is None:
             print(f"   读不到真机状态帧（等了 {FRESH_WAIT_S * 1000:.0f} ms）："
                   "开度滑条起点只能用 100%，不代表真机现在的开度"
@@ -567,14 +569,19 @@ def run_status(args):
     """``--status``：只连接、只读，诊断真机为什么「能读不能控」。
 
     这条路径**不使能、不发运动指令、不开窗口**：``open_real_gripper(enable=False)``
-    只做 connect + load_calibration，之后发出去的只有询问帧——DM 的读请求
-    （0x33）和一次 ``0xCC`` 状态刷新（SDK 的原话："Does not change motor
-    output"），都不带位置/力矩目标。所以电机不会产生任何运动，可以在夹着工件、
-    或手指在别人手里的时候安全地跑。
+    只做 connect + load_calibration，之后发出去的只有 DM 的读请求（0x33），不带
+    位置/力矩目标。所以电机不会产生任何运动，可以在夹着工件、或手指在别人手里的
+    时候安全地跑。
 
-    标定照样要先选（``--calib`` 或当场从候选里选）：读回来的位置要换成开度，靠的
-    就是标定的角度和 ``rad_to_mm``——用别台机器的刻度换算，打出来的百分比是错的，
-    而这条路径存在的意义就是让这个百分比可信。
+    **未使能的电机不主动发状态帧**，所以这条路径上读不到实时位置是**正常结果**，
+    不是错误：位置行和错误码行会被跳过（SDK 的 ``get_state()`` 这时返回的 position
+    只是它构造时的初值 ``0.0``，打出来看着像「夹爪在 5.5%」，实际含义是「从没读到
+    过」），寄存器照读、退出码照常按那里的故障判定给。想让电机开口就先使能，也就是
+    跑不带 ``--status`` 的本样例。
+
+    标定照样要先选（``--calib``、SDK 出厂标定，或两者都没有时当场从候选里选）：读回
+    来的位置要换成开度，靠的就是标定的角度和 ``rad_to_mm``——用别台机器的刻度换算，
+    打出来的百分比是错的，而这条路径存在的意义就是让这个百分比可信。
 
     加 ``--clear-fault`` 才会写：发的也只是 SDK 的故障清除序列——全程
     ``kp=0/kd=0/tau=0`` 的零力矩帧，**不命令任何运动**。但要说清楚：
@@ -582,8 +589,8 @@ def run_status(args):
     手指可能因自重轻微滑动。夹着东西或需要保持位置时先托住再清。
 
     Returns:
-        0 = 健康（或无故障）；1 = 有故障但没清、清除失败，或者**压根读不到状态帧**
-        （这种情况说「健康」是撒谎，退出码也不该是 0）。
+        0 = 健康、无故障，或未使能导致读不到状态帧（判不了故障，不是故障）；
+        1 = 有故障但没清或清除失败。
     """
     if args.dry_run:
         raise SystemExit("--status 和 --dry-run 是两件事：前者要连真机看状态，"
@@ -596,37 +603,32 @@ def run_status(args):
     cleared = 0
     try:
         # ── 1. 读一帧状态 ──
-        # 没使能的电机不会自己发帧，所以先请它回一帧（0xCC，只读、不改输出）再读。
-        # 少了这一步，等不到的 poll 会让 get_state() 返回 MotorState 的初值 0.0
-        # ——打印出来就是「5.5% / 6.63 mm」这种**伪造**读数（真值实测是
-        # −0.370 rad ≈ 27.5%），拿来判断故障只会把人带偏。
+        # 未使能的电机不会自己发帧，所以这里等不到是**预期**结果，不是错误。绝不能
+        # 退回 get_state() 的缓存：那时它是 MotorState 的初值 0.0——打印出来就是
+        # 「5.5% / 6.63 mm」这种**伪造**读数（真值实测是 −0.370 rad ≈ 27.5%），拿
+        # 来判断故障只会把人带偏。
         print("\n[1] 读一帧状态")
-        state = fresh_state(gripper, timeout_s=STATUS_WAIT_S, request=True)
+        state = fresh_state(gripper, timeout_s=STATUS_WAIT_S)
         if state is None:
-            print(f"   读不到状态帧：已经请它回一帧（0xCC，不改电机输出）"
-                  f"并等了 {STATUS_WAIT_S:g} s。")
-            print("      **这种情况下没有可信的位置，也没有可信的故障码**：")
-            print("      SDK 现在会把这件事说出来——GripperState.has_data 为假、"
-                  "is_stale 为真——而 get_state() 返回的 position 只是它构造时的"
-                  "初值 0.0。打出来看着像「夹爪在 5.5%」，「从没读到过」才是它的"
-                  "真意。")
-            print("      查这几处：")
-            print("        · 夹爪是否上电；CAN_H/CAN_L 有没有接反；120Ω 终端电阻；")
-            print(f"        · 接口是否真的起来：ip -details link show {args.channel}")
-            print("        · 总线上是不是已经有别的程序在发帧（两个主控会互相打架，"
-                  "谁都控不住）")
-            return 1
-
-        fraction = rad_to_fraction(gripper, state.position_rad)
-        print("  " + status_line(
-            "真机", fraction=fraction,
-            aperture_mm=fraction_to_aperture_mm(fraction),
-            sdk_mm=state.position_mm, force_n=state.force_n,
-            moving=bool(state.is_moving),
-        ))
-        print(f"   错误码 0x{state.error_code:X} · "
-              f"{describe_code(state.error_code)}"
-              f"（刚要到的一帧实测值，不是缓存）")
+            print(f"   未使能：电机不主动发状态帧，等了 {STATUS_WAIT_S:g} s 没有新帧。")
+            print("      这是 --status 这条只读路径的正常结果，不是错误（本样例不使能，"
+                  "也没有打开电机的公开接口）。")
+            print("      因此下面没有位置行、也没有错误码行：get_state() 这时返回的"
+                  "position 只是它构造时的初值 0.0，打出来看着像「夹爪在 5.5%」，"
+                  "「从没读到过」才是它的真意。")
+            print("      想看实时位置就清掉故障后跑不带 --status 的本样例（会先使能，"
+                  "使能后电机自己持续发帧）。")
+        else:
+            fraction = rad_to_fraction(gripper, state.position_rad)
+            print("  " + status_line(
+                "真机", fraction=fraction,
+                aperture_mm=fraction_to_aperture_mm(fraction),
+                sdk_mm=state.position_mm, force_n=state.force_n,
+                moving=bool(state.is_moving),
+            ))
+            print(f"   错误码 0x{state.error_code:X} · "
+                  f"{describe_code(state.error_code)}"
+                  f"（刚等到的一帧实测值，不是缓存）")
 
         # ── 2. 读寄存器 ──
         print("\n[2] 读寄存器（只发读请求）")
@@ -646,6 +648,15 @@ def run_status(args):
                   "「待查」。")
             print("      所以 03/04/05 空闲时照 200 Hz 持续发帧，不赌这个数字；只读"
                   "不喂帧（或跑了别的只读脚本）同样会把它看哑。")
+
+        if state is None:
+            # 判不了故障码：位置和错误码都只在状态帧里。说「没有故障」是撒谎，但读
+            # 不到帧本身也不是故障——未使能的电机就是不开口。照实说明，退出 0。
+            print("\n故障：判不了。错误码只在状态帧里，而这一路（未使能）读不到"
+                  "状态帧。\n"
+                  "      想判故障就跑不带 --status 的本样例：它会先使能，"
+                  "使能后电机自己发帧。")
+            return 0
 
         if not state.is_error:
             print("\n没有故障。真机能正常接受指令——想动它就直接跑本样例"
@@ -704,9 +715,16 @@ def main():
     if args.dry_run:
         print("样例 05 · 遥操作模式（--dry-run：不碰真机，只走流程）")
         # dry-run 也要先选标定：它走的正是这套参数（目标角、毫米刻度都由标定决定）。
-        # 只读文件、不导入 SDK、不建 CAN 对象——所以这里用纯值版的自洽检查，SDK 那边
-        # 的 config 此刻不存在。
-        calib_path = choose_calibration_file(args.calib)
+        # 不建 CAN 对象——所以这里用纯值版的自洽检查，SDK 那边的 config 此刻不存在。
+        if args.calib:
+            # 显式给了就先把**用户自己指的**文件验掉，不必先有 SDK：指错了应该直接
+            # 报「这个文件不存在」，而不是先抱怨这台机器没装 SDK。
+            calib_path = choose_calibration_file(args.calib)
+        else:
+            # 没给才需要 SDK：出厂标定是默认值，而那个文件跟着 ``litegrip`` 包的目录
+            # 走。导入只是把包读进来，不开总线、不发帧。
+            calib_path = choose_calibration_file(
+                None, factory=factory_calibration_path(import_litegrip()))
         calib = read_calibration_file(calib_path)
         check_calibration_values(
             float(calib["zero_position_rad"]), float(calib["max_position_rad"]),
@@ -819,9 +837,9 @@ def main():
                     # 了——一步就是从错的地方走到目标。所以拿不到就拒绝，别猜。
                     start_rad = None
                     if live:
-                        state = fresh_state(gripper, request=True)
+                        state = fresh_state(gripper)
                         if state is None:
-                            print(f"\n读不到真机的状态帧（先请它回了一帧，又等了 "
+                            print(f"\n读不到真机的状态帧（等了 "
                                   f"{FRESH_WAIT_S * 1000:.0f} ms），**不下发**：")
                             print("   限速要按「现在」的位置算，拿旧读数算出来的"
                                   "是一条阶跃指令，电机接不住。")

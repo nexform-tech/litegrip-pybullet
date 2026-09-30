@@ -38,11 +38,12 @@ def run(script: Path, *args: str, env: dict | None = None
         ) -> subprocess.CompletedProcess:
     """Run an example the way a user would: as a script, from the repo root.
 
-    stdin is closed on purpose.  A hardware example now *asks* which calibration
-    file to use when ``--calib`` is missing, and a child that inherits a real
-    terminal would sit there waiting for an operator to type — a test that hangs
-    instead of failing.  Closed stdin is also the honest simulation of "run from
-    a script": no tty, so the examples must refuse rather than prompt.
+    stdin is closed on purpose.  Without ``--calib`` a hardware example uses the
+    SDK's factory calibration, and only falls back to *asking* when that file
+    cannot be read — but a child that inherits a real terminal would then sit
+    there waiting for an operator to type: a test that hangs instead of failing.
+    Closed stdin is also the honest simulation of "run from a script": no tty, so
+    the examples must refuse rather than prompt.
     """
     # no re-exec under test; `env` lets a test point the SDK discovery elsewhere
     merged = {**os.environ, "LITEGRIP_PYBULLET_REEXEC": "1", **(env or {})}
@@ -109,9 +110,9 @@ def fast_move() -> subprocess.CompletedProcess:
     return run(EXAMPLE_02, *FAST_MOVE)
 
 
-#: 03 needs the *other* SDK checkout -- the one with the trajectory API.  Only
-#: that one can write the ``.lgt`` fixture the offline run replays, and only that
-#: one can load it back, so the run tests below skip where it is absent (CI is
+#: The SDK the hardware examples resolve -- one checkout, the sibling one on
+#: this bench.  Only it can write the ``.lgt`` fixture the offline run replays
+#: and load it back, so the run tests below skip where it is absent (CI is
 #: exactly that case).  The loop itself is covered unconditionally in
 #: ``tests/test_example03_loop.py`` against a stand-in SDK.
 TRAJECTORY_SDK = REPO_ROOT.parent / "litegrip-python" / "src"
@@ -122,7 +123,7 @@ FIXTURE_SAMPLES = 50
 
 #: Sentinel the fixture writer prints when there is no SDK to write with, as
 #: opposed to anything else going wrong.
-NO_SDK = "NO-TRAJECTORY-SDK: "
+NO_SDK = "NO-SDK: "
 
 
 @pytest.fixture(scope="module")
@@ -143,11 +144,11 @@ def trajectory_file(tmp_path_factory) -> str:
     script.write_text(
         "import sys\n"
         f"sys.path.insert(0, {str(EXAMPLES)!r})\n"
-        "from _common import import_trajectory_litegrip\n"
+        "from _common import import_litegrip\n"
         "try:\n"
-        "    import_trajectory_litegrip()\n"
+        "    import_litegrip()\n"
         "except SystemExit as exc:\n"
-        # Not a test failure: this machine has no trajectory SDK.  Reported as a
+        # Not a test failure: this machine has no usable SDK.  Reported as a
         # skip, and anything else the script does is still a failure, so a real
         # mistake in here cannot hide behind this.
         f"    print({NO_SDK!r} + str(exc))\n"
@@ -341,8 +342,8 @@ class TestExample03Trajectory:
         assert "--speed" in output_of(result)
 
     @pytest.fixture
-    def bare_trajectory_sdk(self, tmp_path) -> dict:
-        """An importable ``litegrip`` package with none of the trajectory API."""
+    def bare_sdk(self, tmp_path) -> dict:
+        """An importable ``litegrip`` package with none of the API."""
         package = tmp_path / "litegrip"
         package.mkdir()
         (package / "__init__.py").write_text(
@@ -350,21 +351,20 @@ class TestExample03Trajectory:
             "    pass\n",
             encoding="utf-8",
         )
-        return {"LITEGRIP_TRAJ_SDK_DIR": str(tmp_path)}
+        return {"LITEGRIP_SDK_DIR": str(tmp_path)}
 
-    def test_an_sdk_without_the_trajectory_api_names_what_is_missing(
-            self, bare_trajectory_sdk):
+    def test_an_sdk_without_the_api_names_what_is_missing(self, bare_sdk):
         """The failure mode that has a physical cost: an SDK that imports but
         cannot record or replay must stop the example, not half-run it."""
-        result = run(EXAMPLE_03, "--channel", NOWHERE, env=bare_trajectory_sdk)
+        result = run(EXAMPLE_03, "--channel", NOWHERE, env=bare_sdk)
         assert result.returncode == 1, output_of(result)
         text = output_of(result)
-        assert "缺少轨迹录制/回放的公开接口" in text
+        assert "缺少本仓库必须的公开接口" in text
         assert "LiteGrip.record_start" in text
         assert "LiteGrip.play_start" in text
         assert "Trajectory.load" in text
-        # ...and says which of the two checkouts has them
-        assert "LITEGRIP_TRAJ_SDK_DIR" in text
+        # ...and says which checkout has them
+        assert "LITEGRIP_SDK_DIR" in text
         assert "litegrip-python" in text
         assert NOWHERE not in text      # never reached the bus
 
@@ -372,16 +372,17 @@ class TestExample03Trajectory:
         """Pointing the variable at nothing leaves whatever is installed; CI has
         nothing installed at all.  Both must stop with a usable message."""
         result = run(EXAMPLE_03, "--channel", NOWHERE,
-                     env={"LITEGRIP_TRAJ_SDK_DIR": str(tmp_path / "nope")})
+                     env={"LITEGRIP_SDK_DIR": str(tmp_path / "nope")})
         assert result.returncode == 1, output_of(result)
         text = output_of(result)
-        if "找不到带轨迹" in text:
-            assert "LITEGRIP_TRAJ_SDK_DIR" in text
+        if "找不到真机 SDK" in text:
+            assert "LITEGRIP_SDK_DIR" in text
             assert "litegrip-python" in text
             assert "pip install -e" in text
         else:
-            # An SDK is importable, but it is the one 04/05 use.
-            assert "缺少轨迹录制/回放的公开接口" in text
+            # An SDK is importable, but it is not the one with the trajectory API
+            # (this bench has such a package installed from another repository).
+            assert "缺少本仓库必须的公开接口" in text
         assert NOWHERE not in text
 
     def test_play_runs_the_window_and_touches_no_can(self, trajectory_file):
@@ -486,43 +487,52 @@ class TestExample05Status:
         assert "mm/s" in stdout
 
 
-class TestChoosingCalibrationIsMandatory:
-    """Every path that touches the hardware starts by picking a calibration file.
+class TestCalibrationResolution:
+    """Which calibration the hardware paths use, and in what order.
 
-    ``--calib`` is the scripting way in; without it the example *asks*, and with
-    no terminal to ask on it stops.  What must never happen is the third
-    option -- quietly falling back to the SDK's default path or the factory
-    calibration, whose angles belong to a different machine.
+    ``--calib`` wins; without it the SDK's own factory file is the default; only
+    when even that cannot be read does the example ask, and with no terminal to
+    ask on it stops.  The factory file is a usable default but it is the bench
+    fixture's geometry, so a run that falls back to it has to say so rather than
+    let the operator believe it is their gripper's numbers.
     """
 
-    def test_dry_run_without_calib_refuses(self):
-        """The dry run keeps its promise never to import the SDK, so this is the
-        one that runs in CI -- and ``--dry-run`` needs a calibration anyway."""
-        result = run(EXAMPLE_05, "--dry-run")
-        assert result.returncode == 1, output_of(result)
+    def test_status_without_calib_uses_the_factory_default(self):
+        result = run(EXAMPLE_05, "--status", "--channel", NOWHERE)
         text = output_of(result)
-        assert "--calib" in text
-        # ...and it says where a calibration file comes from in the first place
-        assert "上位机" in text
-        assert "候选" in text, "没列出候选，操作员只能靠猜"
-
-    def test_status_without_calib_refuses(self):
-        result = run(EXAMPLE_05, "--status")
-        if "找不到真机 SDK" in output_of(result):
+        if "找不到真机 SDK" in text:
             pytest.skip("装真机 SDK 才能测到这一步（裸 SDK 会在选标定之前就停）")
-        assert result.returncode == 1, output_of(result)
-        text = output_of(result)
+        assert "使用 SDK 自带的出厂标定" in text, output_of(result)
+        # ...and it says whose numbers those are
+        assert "台架夹具" in text
+        # the factory file is not this gripper's, so it must point at --calib
         assert "--calib" in text
-        assert "上位机" in text
+        # It got past the calibration and stopped at the interface, as it should.
+        assert NOWHERE in text
+        assert result.returncode == 1
 
-    def test_example_04_refuses_too(self):
-        result = run(EXAMPLE_04, "--duration", "1")
-        if "找不到真机 SDK" in output_of(result):
+    def test_example_04_uses_the_factory_default_too(self):
+        result = run(EXAMPLE_04, "--channel", NOWHERE, "--duration", "1")
+        text = output_of(result)
+        if "找不到真机 SDK" in text:
             pytest.skip("装真机 SDK 才能测到这一步（裸 SDK 会在选标定之前就停）")
+        assert "使用 SDK 自带的出厂标定" in text, output_of(result)
+        assert NOWHERE in text
+
+    def test_an_unreadable_factory_file_refuses_non_interactively(
+            self, tmp_path):
+        """Tier three: no ``--calib``, no factory file, and stdin is closed, so
+        there is nobody to ask.  It must stop instead of proceeding on the SDK's
+        own idea of which numbers to use."""
+        package = tmp_path / "litegrip"
+        package.mkdir()
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        result = run(EXAMPLE_05, "--dry-run",
+                     env={"LITEGRIP_SDK_DIR": str(tmp_path)})
         assert result.returncode == 1, output_of(result)
         text = output_of(result)
         assert "--calib" in text
-        assert "上位机" in text
+        assert "出厂标定" in text, "没说默认那份读不出来"
 
     def test_a_simulator_calibration_is_refused(self, tmp_path):
         """The studio keeps the simulator's calibration in a separate
@@ -619,7 +629,13 @@ class TestExample04WithoutHardware:
                      "--calib", calib_file)
         text = output_of(result)
         assert result.returncode == 1
-        if "找不到真机 SDK" in text:
+        if "LITEGRIP_SDK_DIR 指到" in text:
+            # The suite runs the no-SDK case with the variable pointing nowhere,
+            # so this is the message that comes back: it has to say what the
+            # variable should point at, not just that something is missing.
+            assert "没有 litegrip/__init__.py" in text
+            assert "litegrip-python/src" in text
+        elif "找不到真机 SDK" in text:
             # `pip install litegrip` is not the answer — it is not on PyPI — so
             # the message must not offer it as one.
             assert "LITEGRIP_SDK_DIR" in text
@@ -630,14 +646,14 @@ class TestExample04WithoutHardware:
 
 
 class TestSdkWithoutTheRequiredApi:
-    """An SDK that imports but cannot answer "is this reading current?" stops
-    the examples at startup — naming the missing member and where to get one.
+    """An SDK that imports but cannot drive the gripper stops the examples at
+    startup — naming the missing member and where to get one.
 
-    This is the failure mode that used to be silent: the examples reached into
-    ``gripper._can._controller`` for the 0xCC hook, so an SDK without the public
-    API still "worked" right up until a guess about a measured position became a
-    step command.  Exercised with a throwaway checkout so it runs in CI, where
-    no SDK is installed at all.
+    This is the failure mode that has a physical cost: an ``AttributeError``
+    raised from inside the frame loop, after the motor is already enabled.  The
+    check runs first, against an explicit list, so a wrong checkout is reported
+    by name.  Exercised with a throwaway checkout so it runs in CI, where no SDK
+    is installed at all.
     """
 
     @pytest.fixture
@@ -657,8 +673,8 @@ class TestSdkWithoutTheRequiredApi:
         return {"LITEGRIP_SDK_DIR": str(tmp_path)}
 
     @pytest.mark.parametrize("script, args", [
-        # 02 drives by drag now: its speed is a percentage, and no run-length
-        # option is needed to reach the CAN interface and fail there.
+        # 05 drives by drag: its speed is a percentage, and no run-length option
+        # is needed to reach the CAN interface and fail there.
         (EXAMPLE_05, ()),
         (EXAMPLE_04, ("--duration", "1")),
     ], ids=["05_dual_control.py", "04_mirror_real.py"])
@@ -667,7 +683,7 @@ class TestSdkWithoutTheRequiredApi:
         assert result.returncode == 1, output_of(result)
         text = output_of(result)
         assert "缺少本仓库必须的公开接口" in text
-        assert "LiteGrip.refresh_status" in text
-        assert "GripperState.data_age_s" in text
+        assert "LiteGrip.poll" in text
+        assert "GripperState.position_rad" in text
         # ...and it never got as far as the bus, so nothing was transmitted.
         assert NOWHERE not in text
