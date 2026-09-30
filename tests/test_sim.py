@@ -8,9 +8,12 @@ from litegrip_pybullet import (
     APERTURE_CLOSED_MM,
     APERTURE_OPEN_MM,
     DEFAULT_VELOCITY_M_S,
+    MOUSE_LEFT_BUTTON,
+    MOUSE_PRESS,
     N_FINGERS,
     STROKE_M,
     GripperSim,
+    clicked,
     pressed,
 )
 
@@ -299,3 +302,35 @@ class TestPressed:
 
     def test_released_key_is_not_pressed(self):
         assert not pressed({ord("q"): p.KEY_WAS_RELEASED}, (ord("q"),))
+
+
+def mouse_event(event_type: int = MOUSE_PRESS, button: int = MOUSE_LEFT_BUTTON,
+                state: int = p.KEY_WAS_TRIGGERED):
+    """One ``getMouseEvents`` entry, as PyBullet lays it out."""
+    return (event_type, 400, 300, button, state)
+
+
+class TestClicked:
+    def test_empty_events(self):
+        assert not clicked([])
+
+    def test_a_left_press_is_a_click(self):
+        assert clicked([mouse_event()])
+
+    def test_a_released_button_is_not_a_click(self):
+        """A release is the end of the press, which has already been reported."""
+        assert not clicked([mouse_event(state=p.KEY_WAS_RELEASED)])
+
+    def test_a_button_held_down_is_not_a_click(self):
+        """``KEY_IS_DOWN`` repeats every frame while it is held; a caller using
+        this to start a motion would fire once per frame instead of once."""
+        assert not clicked([mouse_event(state=p.KEY_IS_DOWN)])
+
+    def test_another_button_is_not_a_click(self):
+        assert not clicked([mouse_event(button=2)])
+
+    def test_a_mouse_move_is_not_a_click(self):
+        assert not clicked([mouse_event(event_type=0)])
+
+    def test_a_mouse_events_list_without_a_window_is_empty(self, sim):
+        assert sim.mouse_events() == []

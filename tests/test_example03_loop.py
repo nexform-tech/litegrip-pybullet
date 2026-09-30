@@ -36,6 +36,15 @@ pytest.importorskip("pybullet")
 #: that is 2, so a fake handing out a bare ``1`` makes every key press a no-op.
 from pybullet import KEY_WAS_TRIGGERED  # noqa: E402  (after importorskip)
 
+from litegrip_pybullet import (  # noqa: E402  (same reason)
+    CONFIRM_KEYS,
+    MOUSE_LEFT_BUTTON,
+    MOUSE_PRESS,
+)
+
+#: A left-button press as the window reports it in ``getMouseEvents``.
+MOUSE_CLICK = (MOUSE_PRESS, 400, 300, MOUSE_LEFT_BUTTON, KEY_WAS_TRIGGERED)
+
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 os.environ.setdefault("LITEGRIP_PYBULLET_REEXEC", "1")
@@ -221,17 +230,24 @@ class FakeGripper:
 
 
 class FakeSim:
-    """Stands in for ``GripperSim``: no window, no physics, a step budget."""
+    """Stands in for ``GripperSim``: no window, no physics, a step budget.
+
+    ``keys_at`` / ``clicks_at`` are keyed by *tick* — the call count of
+    :meth:`keyboard_events`, one per loop iteration — because that is what
+    decides whether a press lands inside the recording or inside the gate that
+    follows it.
+    """
 
     def __init__(self, clock: FakeClock, steps: int, keys_at=None,
-                 dt: float = 0.02) -> None:
+                 clicks_at=(), gui: bool = False, dt: float = 0.02) -> None:
         self.clock = clock
         self.steps_left = steps
         self.keys_at = keys_at or {}
+        self.clicks_at = set(clicks_at)
         self.dt = dt
         self.tick = 0
         self.urdf_path = "fake.urdf"
-        self.gui = False
+        self.gui = gui
         self.mirrored: list[float] = []
         self.status: list[str] = []
         self.disconnected = False
@@ -245,6 +261,9 @@ class FakeSim:
     def keyboard_events(self):
         self.tick += 1
         return {key: KEY_WAS_TRIGGERED for key in self.keys_at.get(self.tick, ())}
+
+    def mouse_events(self):
+        return [MOUSE_CLICK] if self.tick in self.clicks_at else []
 
     def reset_fraction(self, fraction: float) -> None:
         self.mirrored.append(fraction)
@@ -276,15 +295,20 @@ def fake_sdk(trajectory_class=FakeTrajectory) -> SimpleNamespace:
 
 
 def _run(monkeypatch, gripper=None, steps=200, mode="record", record=0.1,
-         speed=1.0, keys_at=None, sdk_trajectory=FakeTrajectory):
-    """Run example 03's ``main()`` against fakes; return the pieces."""
+         speed=1.0, keys_at=None, clicks_at=(), gui=False,
+         sdk_trajectory=FakeTrajectory):
+    """Run example 03's ``main()`` against fakes; return the pieces.
+
+    ``gui=True`` gives the fake a window: that is what puts the go-ahead in
+    front of the replay, and what makes a click worth injecting.
+    """
     clock = FakeClock()
     gripper = gripper if gripper is not None else FakeGripper()
-    sim = FakeSim(clock, steps, keys_at=keys_at)
+    sim = FakeSim(clock, steps, keys_at=keys_at, clicks_at=clicks_at, gui=gui)
 
     args = SimpleNamespace(
         channel="can0", can_id=0x08, mst_id=0x18, calib="/tmp/calib.json",
-        urdf=None, headless=True, record=record, speed=speed, real=False,
+        urdf=None, headless=not gui, record=record, speed=speed, real=False,
         play=None,
     )
     if mode == "play":
@@ -387,6 +411,50 @@ class TestRecording:
             f"录制期间本样例自己发了帧：{calls[start:stop]}"
 
 
+class TestEndingTheRecording:
+    """Ending a recording is its own key, and it is not the quit key.
+
+    Before this, the only way to stop recording was Esc / Q — the key that means
+    *quit* everywhere else in the example — and the run then went straight into
+    the replay, so the two were indistinguishable from one press.
+    """
+
+    def test_the_confirm_key_ends_the_recording(self, monkeypatch, capsys):
+        run = _run(monkeypatch, record=0, steps=60,
+                   keys_at={5: (CONFIRM_KEYS[0],)})
+        out = capsys.readouterr().out
+        assert "收到确认键：录制结束" in out
+        assert "record_stop" in run.gripper.calls, "按键之后录制没停"
+        assert run.gripper.trajectory.saved_as, "结束了却没存"
+
+    def test_the_space_key_ends_it_too(self, monkeypatch, capsys):
+        run = _run(monkeypatch, record=0, steps=60,
+                   keys_at={5: (CONFIRM_KEYS[1],)})
+        assert "收到确认键：录制结束" in capsys.readouterr().out
+        assert run.gripper.trajectory.saved_as
+
+    def test_escape_abandons_the_recording_instead(self, monkeypatch, capsys):
+        """Esc / Q is what it is everywhere else: get me out, keep nothing."""
+        run = _run(monkeypatch, record=0, steps=60, keys_at={5: (27,)})
+        out = capsys.readouterr().out
+        assert "这次录制作废" in out
+        assert run.code == 1, "放弃了却报了成功"
+        assert run.gripper.trajectory.saved_as is None, "说了不要还是存了"
+        assert not run.gripper.playing, "作废的录制还是去回放了"
+
+    def test_a_recording_with_no_key_still_ends_on_the_clock(self, monkeypatch):
+        """``--record N`` is unchanged: it is the hands-free path."""
+        run = _run(monkeypatch, record=0.1)
+        assert "record_stop" in run.gripper.calls
+        assert run.gripper.trajectory.saved_as
+
+    def test_it_says_which_key_does_what(self, monkeypatch, capsys):
+        _run(monkeypatch, record=0.1)
+        out = capsys.readouterr().out
+        assert "Enter / 空格" in out, "没说清楚结束录制是哪个键"
+        assert "放弃" in out, "没说 Esc / Q 在录制期间是放弃"
+
+
 class TestReplayingOnTheHardware:
     """``--play`` with the recording path: one trajectory, both targets."""
 
@@ -434,9 +502,78 @@ class TestReplayingOnTheHardware:
         assert run.gripper.disabled, "退出时没有失能"
 
 
+class TestNothingReplaysWithoutAGoAhead:
+    """The recording hands off to a question, not to the replay.
+
+    The moment the recording stops is the moment the motor starts moving on its
+    own for the first time in the run, and the operator's hand is usually still
+    on the fingers.  So the replay waits for one deliberate action, and a run
+    that never gets one saves the trajectory and stops there.
+    """
+
+    def test_a_click_starts_the_replay(self, monkeypatch, capsys):
+        run = _run(monkeypatch, gui=True, record=0.1, steps=120, clicks_at={12})
+        out = capsys.readouterr().out
+        assert "play_start" in run.gripper.calls, "在窗口里点了，还是没回放"
+        assert "收到开始信号" in out
+        assert out.index("录制结束") < out.index("收到开始信号"), \
+            "回放发生在录制结束之前"
+
+    def test_no_go_ahead_means_no_replay(self, monkeypatch, capsys):
+        run = _run(monkeypatch, gui=True, record=0.1, steps=120)
+        out = capsys.readouterr().out
+        assert "play_start" not in run.gripper.calls, "没人确认就开始回放了"
+        assert run.code == 0, "不确认回放被当成了失败"
+        assert "没有确认开始" in out
+        assert run.gripper.trajectory.saved_as, "不回放就连录的也不存了"
+        assert run.gripper.disabled, "退出时没有失能"
+
+    def test_the_confirm_key_works_too(self, monkeypatch, capsys):
+        """Nothing here is mouse-only: a keyboard has to be able to do it."""
+        run = _run(monkeypatch, gui=True, record=0.1, steps=120,
+                   keys_at={12: (CONFIRM_KEYS[0],)})
+        assert "play_start" in run.gripper.calls
+        assert "收到开始信号" in capsys.readouterr().out
+
+    def test_escape_declines_the_replay(self, monkeypatch, capsys):
+        run = _run(monkeypatch, gui=True, record=0.1, steps=120,
+                   keys_at={12: (27,)})
+        out = capsys.readouterr().out
+        assert "play_start" not in run.gripper.calls
+        assert "先不放" in out
+        assert "不回放" in run.sim.status[-1], "窗口还停在「等你点一下」"
+        assert run.code == 0
+
+    def test_a_click_while_recording_is_not_the_go_ahead(self, monkeypatch):
+        """Clicking the window mid-drag must not arm the replay."""
+        run = _run(monkeypatch, gui=True, record=0.1, steps=120, clicks_at={3})
+        assert "play_start" not in run.gripper.calls
+
+    def test_it_says_what_it_is_waiting_for(self, monkeypatch, capsys):
+        run = _run(monkeypatch, gui=True, record=0.1, steps=120)
+        out = capsys.readouterr().out
+        assert "点一下鼠标" in out
+        assert run.sim.status, "窗口里没有提示在等什么"
+
+    def test_headless_is_not_gated(self, monkeypatch, capsys):
+        """No window, no way to click: waiting would hang instead of demoing."""
+        run = _run(monkeypatch, record=0.1, steps=120)
+        assert "play_start" in run.gripper.calls
+        assert "没有窗口可点" in capsys.readouterr().out
+
+
 class TestTheMotorIsNeverLeftUnfed:
     """Between phases the SDK stops feeding, and an enabled motor silent for
     about a second latches its communication-loss fault (0xD)."""
+
+    def test_it_holds_position_while_waiting_for_the_go_ahead(self, monkeypatch):
+        """The wait is the longest unfed stretch in the run: it lasts as long as
+        the operator takes to click."""
+        run = _run(monkeypatch, gui=True, record=0.1, steps=120)
+        calls = run.gripper.calls
+        stop = calls.index("record_stop")
+        assert "frame" in calls[stop:], (
+            f"等确认的时候没人喂电机：{calls[stop:]}")
 
     def test_it_holds_position_after_the_recording_stops(self, monkeypatch):
         run = _run(monkeypatch, record=0.1)

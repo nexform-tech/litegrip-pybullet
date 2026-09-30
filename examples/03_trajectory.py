@@ -25,16 +25,22 @@ PyBullet——真机的电机按轨迹走，窗口里的仿真跟着显示，所
 
 两种用法:
 
-  * **录一段再放**（默认）：连接 → 进零重力 → 手拖 → 存盘 → 真机和仿真一起回放。
+  * **录一段再放**（默认）：连接 → 进零重力 → 手拖 → **按 Enter / 空格结束录制**
+    → 存盘 → **在窗口里点一下** → 真机和仿真一起回放。
   * **放一段已有的**（``--play``）：默认**只灌仿真**，不连真机、一帧都不发，用来
     回看之前录的东西。要在真机上也放，加 ``--real``。
+
+录制结束**不会**自己接着回放，要一个明确的动作才开始，所以这里有两个动作：录制期间
+Enter / 空格 是「录完了」，Esc / Q 是「这次不算，退出」；录完之后 Enter / 空格 或在
+窗口里点一下鼠标（左键）是「开始回放」，Esc / Q 是「先不放，退出」。回放会把真机动
+起来，这几秒手要离开行程，所以**不**让它自己开始。
 
 注意：**使能态**的电机静默就锁进通信丢失故障（0xD）——红灯闪、位置照读、指令一律
 不执行。多久算静默，两个数不一致：本仓在这台机器上实测约 0.9 s，而 SDK 自己的文档
 写的是约 100 ms，取短的为准——本样例按 200 Hz 连续喂，两个数都够不着。录制结束时
 SDK 只补一帧 ``exit_zero_gravity()`` 就撒手，所以本样例在「录制结束 → 开始回放」这
-段空档里自己发「锁在实测位置」的保持帧，回放结束时也一样。发的不是运动指令：目标
-就是它当时的位置，零前馈。
+段空档里自己发「锁在实测位置」的保持帧——等你点击的那段也算在里面，回放结束时也
+一样。发的不是运动指令：目标就是它当时的位置，零前馈。
 
 注意：回放结束后手指停在轨迹终点，**不会**自己回去。按 Esc / Q 退出时本样例会失能
 （0xFD），手指随之变松、可能因自重滑动。
@@ -66,8 +72,10 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
 )
 
 from litegrip_pybullet import (
+    CONFIRM_KEYS,
     QUIT_KEYS,
     GripperSim,
+    clicked,
     fraction_to_aperture_mm,
     pressed,
 )
@@ -105,7 +113,7 @@ def parse_args():
     add_common_args(ap)
     add_hardware_args(ap)
     ap.add_argument("--record", type=float, default=0.0,
-                    help="录制多少秒后自动停（默认 0 = 一直录到 Esc/Q）")
+                    help="录制多少秒后自动停（默认 0 = 一直录到 Enter/空格）")
     ap.add_argument("--play", default=None,
                     help="回放一段已有的轨迹（名字或路径，不带 .lgt 也行）。默认"
                          "**只灌仿真**：不连真机、一帧都不发；要在真机上也放，"
@@ -253,24 +261,35 @@ def feed(keeper):
 
 
 def record_phase(gripper, sim, args):
-    """``[3]`` 录制：进零重力、手拖、Esc/Q（或 ``--record N`` 秒）结束。
+    """``[3]`` 录制：进零重力、手拖、Enter/空格（或 ``--record N`` 秒）结束。
+
+    结束录制的键**只**是 Enter / 空格：Esc / Q 在这里是「这段不要了，退出」，不会
+    留下轨迹。录完也不回放——回放要另一次确认，见 :func:`wait_for_start`。
 
     Returns:
-        录到的轨迹；SDK 说这次录制是空的（一个样本都没有）时返回 ``None``。
+        录到的轨迹；这次录制是空的（一个样本都没有）、或者中途按了退出键时返回
+        ``None``。
     """
     print("\n[3] 录制：手拖一遍")
     print("   [真机] 进零重力——两个手指的力被撤掉，可以直接用手推动")
     print(f"   [真机] SDK 在后台按 {RATE_HZ:g} Hz 采样"
-          + (f"；{args.record:g} s 后自动停" if args.record > 0 else
-             "；按 Esc / Q 结束录制"))
+          + (f"；{args.record:g} s 后自动停" if args.record > 0 else ""))
+    print("   按 Enter / 空格 结束录制（录完还要确认一次才回放）；"
+          "按 Esc / Q 放弃这次录制并退出")
     # zero_gravity=True 时**录制器自己**在流零力矩帧，本样例这一路一个运动指令都
     # 不能发（SDK 原话：Do not drive the gripper from the caller while that runs）。
     gripper.record_start(rate_hz=RATE_HZ, zero_gravity=True)
     started = time.monotonic()
     last_print = 0.0
+    abandoned = False
     while sim.connected():
-        if pressed(sim.keyboard_events(), QUIT_KEYS):
-            print("\n   收到退出键")
+        keys = sim.keyboard_events()
+        if pressed(keys, CONFIRM_KEYS):
+            print("\n   收到确认键：录制结束")
+            break
+        if pressed(keys, QUIT_KEYS):
+            print("\n   收到退出键：这次录制作废")
+            abandoned = True
             break
         now = time.monotonic()
         if args.record > 0 and now - started >= args.record:
@@ -307,6 +326,9 @@ def record_phase(gripper, sim, args):
     except Exception as exc:     # TrajectoryEmptyError / TrajectoryRecordingError
         print(f"\n   这次没录到东西：{exc}")
         return None
+    if abandoned:
+        print("   按了退出键，这段不保存、也不回放")
+        return None
     print(f"\n   录到 {len(trajectory)} 个样本 · {trajectory.duration:.2f} s")
     return trajectory
 
@@ -325,6 +347,46 @@ def save_phase(trajectory):
     print(f"\n[4] 保存轨迹\n   {path}")
     print(f"   下次回放：--play {name}")
     return name
+
+
+def wait_for_start(sim, keeper):
+    """录制与回放之间的闸门：等到一个明确的「开始回放」才开始，返回等没等到。
+
+    录完直接接着放，是**真机在这一跑里第一次自己动**，而这时候操作员的手多半还在
+    手指上、眼睛还在夹爪那边。所以这里要一个明确动作：在窗口里点一下鼠标（左键），
+    或者按 Enter / 空格。Esc / Q 表示「先不放，退出」——轨迹已经存下来了，随时可以
+    用 ``--play`` 再放。
+
+    等待期间照旧喂保持帧：这时候电机还使能着，静默约 :data:`MEASURED_COMM_LOSS_S`
+    就锁 0xD，而「等你点击」正好是一段没人喂帧的时间。
+
+    ``--headless`` 时没有窗口、也没人点得了，直接放行——否则会一直等下去。
+    """
+    if not sim.gui:
+        print("\n   录制结束。--headless 没有窗口可点，直接回放")
+        return True
+    print("\n   录制结束。回放会把真机动起来，所以不自己开始：")
+    print("   在窗口里点一下鼠标（左键），或按 Enter / 空格 → 开始回放；"
+          "按 Esc / Q → 先不放，退出")
+    print("   注意：在窗口里拖动（转视角）也算点过了，所以要调视角就先调好")
+    sim.status_text("录完了 · 在窗口里点一下（或按 Enter / 空格）开始回放")
+    # 先丢掉结束录制那一拍的按键：同一个 Enter / 空格不该一次算两回——按一下结束
+    # 录制，紧接着又被当成「开始回放」。
+    sim.keyboard_events()
+    while sim.connected():
+        keys = sim.keyboard_events()
+        if clicked(sim.mouse_events()) or pressed(keys, CONFIRM_KEYS):
+            print("\n   收到开始信号：回放")
+            return True
+        if pressed(keys, QUIT_KEYS):
+            print("\n   收到退出键：先不放")
+            # 窗口里那行字要跟着改，不然画面还停在「等你点一下」。
+            sim.status_text("没有确认，这次不回放 · 按 Esc / Q 退出")
+            return False
+        feed(keeper)
+        if not sim.step():
+            break
+    return False
 
 
 def load_trajectory(litegrip, name):
@@ -486,6 +548,7 @@ def main():
         else:
             print("   跳过：--play 默认不碰真机（要真机也一起放就加 --real）")
 
+        replay_now = True
         if args.play:
             print("\n[3] 录制")
             print("   跳过：--play 放的是已有的轨迹")
@@ -501,13 +564,19 @@ def main():
                 return 1
             # record_stop() 之后到 play_start() 之前是这次运行里唯一的空档：中间
             # 只做「读一帧位置 → 写文件 → 打印」，几十毫秒，远在 0.9 s 的预算之内。
-            # 两头顶上保持帧，是让它不依赖「这几步一定不慢」这个假设。
+            # 两头顶上保持帧，是让它不依赖「这几步一定不慢」这个假设——等确认的
+            # 那段时间也算在里面，所以 wait_for_start 自己也喂。
             keeper.hold_at(read_state(gripper))
             feed(keeper)
             saved = save_phase(trajectory)
+            replay_now = wait_for_start(sim, keeper)
 
         if gripper is None:
             play_offline(sim, trajectory, args)
+        elif not replay_now:
+            print("\n[5] 回放")
+            print(f"   跳过：没有确认开始。轨迹存下来了，随时可以 "
+                  f"--play {saved} 放")
         else:
             feed(keeper)
             play_online(gripper, sim, trajectory, args, keeper)

@@ -140,13 +140,20 @@ Teach the gripper a motion by hand, save it, and play it back into the hardware
 
 1. **Record.** The motor drops into zero gravity — its force is switched off and
    you push the fingers through the motion yourself — while the SDK samples the
-   opening at 100 Hz in the background. Press **Esc** / **Q** to stop, or pass
-   `--record 6` to stop by itself. The window follows your hand as you go.
+   opening at 100 Hz in the background. Press **Enter** / **Space** to end the
+   recording, or pass `--record 6` to stop by itself; **Esc** / **Q** means
+   "discard this one" and saves nothing. The window follows your hand as you go.
 2. **Save.** The recording goes to `~/.litegrip/trajectories/` as a `.lgt` named
    after the example and the time, so a second recording cannot overwrite the
    first. Nothing is written into this repository: a trajectory is data measured
    on one machine.
-3. **Replay.** The same trajectory drives the motor and teleports the simulated
+3. **Confirm.** The recording does not run on into the replay by itself: you
+   **click the window** (left button), or press **Enter** / **Space**, to start
+   it; **Esc** / **Q** to leave it unplayed for now. That is what gives you the
+   moment to get your hand out of the travel before the motor starts — and note
+   that dragging to rotate the view counts as the click, so set the camera up
+   before you get to this point.
+4. **Replay.** The same trajectory drives the motor and teleports the simulated
    fingers onto its **measured** position, so what the window shows is what the
    gripper is doing. The fingers stop where the trajectory ends and do not return
    to the start by themselves.
@@ -184,7 +191,8 @@ yet. An enabled motor that hears nothing latches the communication-loss fault
 (0xD) — see [Why "just watching" still has to send
 frames](#why-just-watching-still-has-to-send-frames). So this example streams
 "**locked at the measured position**" hold frames at 200 Hz through every gap:
-after `enable()`, between the recording and the replay, and after the replay ends
+after `enable()`, between the recording and the replay (which includes the wait
+for your click — the longest unfed gap in the run), and after the replay ends
 until you quit. It commands no motion; the target *is* the position the motor
 reports, with zero feed-forward.
 
@@ -434,11 +442,14 @@ force is off and your hand is on the fingers, so nothing can pinch you — the r
 there is that you push the fingers somewhere they cannot go, or that the recording
 starts before you are holding it. Replay is the opposite: the motor is under
 closed-loop control and follows the trajectory at whatever `kp` and `kd` the
-calibration carries. Keep clear of the travel during the replay, and remember that
-the fingers stay at the end of the trajectory, at force, until you quit or the
-example is stopped. **Do not** run a replay in front of someone who is not
-expecting the gripper to move: there is no confirmation step, and the window shows
-the motion at the same time as the hardware does it.
+calibration carries. And the end of a recording does **not** run into the replay:
+nothing moves until you click the window (or press Enter / Space), which is the
+moment to take your hand out of the travel — so do not click while your fingers
+are still in it. Keep clear of the travel during the replay, and remember that the
+fingers stay at the end of the trajectory, at force, until you quit or the example
+is stopped. **Do not** run a replay in front of someone who is not expecting the
+gripper to move: the click you make *is* the replay, and the window shows the
+motion at the same time as the hardware does it.
 
 Confirm the CAN interface before anything moves:
 
