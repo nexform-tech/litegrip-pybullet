@@ -1,8 +1,10 @@
 # LiteGrip PyBullet examples
 
-Five runnable programs that build on one another: read the model, move it in
-simulation, teach the gripper a motion by hand and replay it into both, then
-couple the two in each direction.
+Five runnable programs that build on one another — read the model, move it in
+simulation, teach the gripper a motion by hand and replay it into both sides,
+then couple the two in each direction. Read this if you are about to run one of
+them, or if you are looking for the checklist that has to come before a real
+gripper moves.
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -14,39 +16,47 @@ couple the two in each direction.
 | [`04_mirror_real.py`](04_mirror_real.py) | gripper → simulation | Yes, to actually mirror |
 | [`05_dual_control.py`](05_dual_control.py) | simulation → gripper | Yes, to actually move |
 
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [One opening, three notations](#one-opening-three-notations)
+- [01 — hello, simulation](#01--hello-simulation)
+- [02 — moving, in simulation](#02--moving-in-simulation)
+- [03 — recording a motion and replaying it](#03--recording-a-motion-and-replaying-it)
+- [04 — the gripper drives the simulation](#04--the-gripper-drives-the-simulation)
+- [05 — simulation drives the gripper](#05--simulation-drives-the-gripper)
+- [Before you drive the hardware](#before-you-drive-the-hardware)
+- [Shared helpers](#shared-helpers)
+- [Notes](#notes)
+
 ## Prerequisites
 
 ```bash
 python3 -m pip install pybullet                       # examples 01–02
-python3 -m pip install -e /path/to/lite-grip          # examples 04–05
-python3 -m pip install -e /path/to/litegrip-python    # example 03
+python3 -m pip install -e /path/to/litegrip-python    # examples 03–05
 ```
 
 The `litegrip` SDK is **not on PyPI**: `pip install litegrip` installs something
-else, and no released version carries the API these examples use. Take it from a
-checkout — either an editable install as above, or a sibling directory next to
-this repository, or an environment variable:
+else, and no released version carries the API these examples use. All three
+hardware examples take it from **one** checkout,
+[`nexform-tech/litegrip-python`](https://github.com/nexform-tech/litegrip-python),
+found in this order:
 
-| Examples | Checkout | Sibling directory | Environment variable |
-| --- | --- | --- | --- |
-| 04, 05 | `lite-grip` | `../lite-grip` | `LITEGRIP_SDK_DIR` |
-| 03 | `litegrip-python` | `../litegrip-python` | `LITEGRIP_TRAJ_SDK_DIR` |
+1. `$LITEGRIP_SDK_DIR`, pointing at the directory that *contains* the `litegrip`
+   package — `<repo>/src` in a src layout, not the package directory and not the
+   repository root.
+2. A sibling checkout next to this repository: `../litegrip-python`, tried as
+   `src/` and then as the repository root.
+3. Whatever `litegrip` is installed in the running interpreter.
 
-**Two checkouts, because the API is split across them and both report
-`__version__ == 2.2.0`.** Read the capability, not the version number:
-
-| API | `lite-grip` | `litegrip-python` |
-| --- | --- | --- |
-| `LiteGrip.refresh_status`, `GripperState.has_data` / `is_stale` / `data_age_s` | yes | **no** |
-| `LiteGrip.record_start` / `record_stop` / `play_start` / `play_stop` / `trajectory_status`, `litegrip.trajectory` | **no** | yes |
-
-Missing its own checkout, each example stops at startup and names the members it
-needs (`LiteGrip.refresh_status`, `GripperState.data_age_s` / `has_data` /
-`is_stale` for 04/05; `LiteGrip.record_start`, `Trajectory.load` and the rest for
-03) instead of failing somewhere inside a control loop. **Do not** point
-`LITEGRIP_SDK_DIR` at `litegrip-python`: 04 and 05 read it, fail their own check
-against it and refuse to start. The two variables name two capabilities and are
-not interchangeable.
+Missing one, an example stops at startup and names the members it needs
+(`LiteGrip.record_start`, `LiteGrip.poll`, `Trajectory.load`, …) instead of
+failing somewhere inside a control loop. **Do not** point `LITEGRIP_SDK_DIR` at
+a directory that has no `litegrip` package in it: the examples stop with an
+explanation rather than importing a same-named package from somewhere else.
+Another repository ships a package called `litegrip` whose `__version__` is also
+2.2.0 but which has no trajectory API, so the version number cannot tell the two
+apart — the startup check can. `$LITEGRIP_TRAJ_SDK_DIR` no longer exists.
 
 If `pybullet` is missing, the examples re-exec themselves into `./.venv/bin/python`
 when that exists. Nothing else is required: the URDF and its meshes are bundled
@@ -86,9 +96,7 @@ at calibration time from a stroke length the loader never writes back, so the tw
 can disagree; when they do, `position_mm / max_stroke_mm` saturates partway and
 the top of the slider does nothing. See `_common.fraction_to_target_rad`.
 
-## The five examples
-
-### 01 — hello, simulation
+## 01 — hello, simulation
 
 Reads the model and moves nothing. No hardware, no CAN, no SDK — and no motion
 call anywhere in the file: `sim.step()` only pumps the window's events and
@@ -111,7 +119,7 @@ and refuses it any motion call (`command_fraction`, `command_joint`,
 `reset_fraction`, `settle`, `run_for`, `add_box`), and separately asserts its
 output never claims a motion happened.
 
-### 02 — moving, in simulation
+## 02 — moving, in simulation
 
 The same gripper, now driven, still with nothing but PyBullet:
 
@@ -133,7 +141,7 @@ example has no part to grasp or pull on, and argparse rejects those flags with
 exit 2 rather than ignoring them. They belonged to the old `03_grasp.py`, which
 no longer exists.
 
-### 03 — recording a motion and replaying it
+## 03 — recording a motion and replaying it
 
 Teach the gripper a motion by hand, save it, and play it back into the hardware
 **and** the window at the same time:
@@ -174,8 +182,9 @@ in it is used as written.
 
 `--play` on its own touches nothing: no connection, no enable, no frame. It reads
 the file and drives the window from it, which is the one path this example has
-that runs without a gripper (and the only one CI can run). Add `--real` to send
-the same trajectory to the hardware as well.
+that runs without a gripper — and the only hardware-example path CI can run, in
+the runs where a checkout is present to write the fixture with. Add `--real` to
+send the same trajectory to the hardware as well.
 
 Replay commands **position**, not force. The recorded torque is kept in the file
 as a diagnostic and is never fed forward, so a squeeze that was recorded against
@@ -183,7 +192,7 @@ a part replays as a position path that presses with whatever `kp` yields — the
 grip force you taught is not preserved. For a repeatable grip, replay the motion
 and then call the SDK's `grasp(force_n=...)`.
 
-#### Between the phases, this example feeds the motor itself
+### Between the phases, this example feeds the motor itself
 
 `record_stop()` puts the motor back under closed-loop control and then stops: the
 SDK's recorder was the only thing streaming frames, and the replay has not started
@@ -201,7 +210,7 @@ Both are SDK background threads streaming the bus, and a second stream on the sa
 wire tears the trajectory apart. The example's hold frames are therefore strictly
 between phases, never inside one.
 
-### 04 — the gripper drives the simulation
+## 04 — the gripper drives the simulation
 
 The hardware is the source of truth; the simulation is a display. Each frame
 reads the hardware position once and teleports the simulated fingers onto it with
@@ -225,10 +234,11 @@ python3 examples/04_mirror_real.py --headless       # terminal readings only
 python3 examples/04_mirror_real.py --duration 10    # stop after 10 s
 ```
 
-Like 05, this needs a calibration file on every run — see
+Like 05, this reads a calibration file on every run. With no `--calib` it uses
+the factory calibration shipped inside the SDK package — see
 [Before you drive the hardware](#before-you-drive-the-hardware).
 
-#### Why "just watching" still has to send frames
+### Why "just watching" still has to send frames
 
 An **enabled** motor that hears nothing for about **0.9 s** latches the
 communication-loss fault (0xD) — again a blinking red LED, positions that still
@@ -259,7 +269,7 @@ a single frame has nothing after it, so an enabled motor goes quiet and latches
 0xD within the second — with nobody left to clear it. The gripper therefore goes
 limp on exit and the fingers may drift under their own weight.
 
-### 05 — simulation drives the gripper
+## 05 — simulation drives the gripper
 
 The window is two things at once: three sliders that *command* the hardware, and
 a mirror that *shows* where the hardware is. Enabling the motor does not move
@@ -298,9 +308,15 @@ python3 examples/05_dual_control.py --speed 40        # start the speed slider a
 python3 examples/05_dual_control.py --force 20 --channel can1
 ```
 
-`--calib` is required on every run, `--dry-run` included; without it the example
-lists the calibration candidates and asks (see
-[Before you drive the hardware](#before-you-drive-the-hardware)).
+With no `--calib` the example uses the factory calibration inside the SDK
+package; if that file cannot be read either, it lists the candidates and asks
+(see [Before you drive the hardware](#before-you-drive-the-hardware)).
+
+`--dry-run` resolves a calibration the same way — the target angles and the
+millimetre scale come from it — but it never opens CAN. An explicit `--calib` is
+validated before any SDK import, so a wrong path is reported as a missing file
+rather than as a missing SDK; with no `--calib`, the SDK package is imported
+(imported only: no bus, no frames) to locate its factory file.
 
 `--dry-run` runs the same loop with no CAN traffic and no measured position, so
 the window follows the *commanded* opening instead of mirroring the hardware and
@@ -309,7 +325,7 @@ the status line says `dry-run` to remind you.
 `--headless` is refused: the sliders are the input device, and a DIRECT
 connection has no sliders. Use 01 for a headless run.
 
-#### Why it ramps
+### Why it ramps
 
 The MIT position term is `kp × (q_target − q_actual)`, and `kp` is an entry in
 the calibration file rather than a constant. At the SDK's default `kp = 100
@@ -329,7 +345,7 @@ This is also why the speed limit is a limit on the *target*, not on the slider.
 Yanking the opening slider from fully open to fully closed still costs the motor
 one bounded increment per frame — the drag's own speed never reaches the bus.
 
-#### Why it slows down at the end
+### Why it slows down at the end
 
 The ramp reaches the target *and then the fingers move back a little*, most
 visibly when opening. The cause is the velocity field of an MIT frame: `dq` is a
@@ -351,25 +367,34 @@ The SDK's own `_move_at_speed_rad` does **not** do this — it holds `dq` at the
 full speed and then sets it to `0` on the frame it stops — so the same recoil
 appears when a script drives the gripper with the SDK directly.
 
-#### If a wedged gripper reads but won't move
+### If a wedged gripper reads but won't move
 
 ```bash
-python3 examples/05_dual_control.py --status                  # read only, sends nothing
+python3 examples/05_dual_control.py --status                  # read only, no motion command
 python3 examples/05_dual_control.py --status --clear-fault    # clear the latched fault
 ```
 
 `--status` opens no window, does not enable the motor and **sends no motion
-command at all** — it just reads the error code and translates it, so it is safe
-to run while the gripper holds a part or is in someone's hands. It touches the
-hardware, so it needs the calibration file too: the two lines above each take a
-`--calib <path>`, or let the example list the candidates on a terminal. Only
-`--clear-fault` sends frames, and those are all zero-torque; but the SDK's clear
-sequence is disable → clear → enable, so the motor goes limp for an instant and
-the fingers may drift under their own weight. Support the gripper first.
+command at all** — it reads the error code and translates it, so it is safe to
+run while the gripper holds a part or is in someone's hands. Reading the DM
+registers does put read requests on the bus, which is not the same as sending no
+frames: it is the *motion* commands it never sends.
+
+An unpowered, unenabled motor sends no status frames, so `--status` there cannot
+read a position at all. That is reported as "cannot tell" with **exit 0**, not as
+a fault: it skips the position and error-code lines rather than printing the
+SDK's `0.0` initial value as if it were a measurement, and still reads the
+registers. Faults are only determinable from a status frame, so run the example
+without `--status` if you need that judgement — it enables the motor, and an
+enabled motor streams frames by itself.
+
+Only `--clear-fault` sends frames, and those are all zero-torque; but the SDK's
+clear sequence is disable → clear → enable, so the motor goes limp for an instant
+and the fingers may drift under their own weight. Support the gripper first.
 
 The fault is latched: it will not clear itself until the gripper is power-cycled.
 
-##### Two faults look identical and are not
+### Two faults look identical and are not
 
 | Code | Meaning | What triggers it |
 | --- | --- | --- |
@@ -457,22 +482,32 @@ Confirm the CAN interface before anything moves:
 ip -details link show can0
 ```
 
-**Pick this gripper's calibration file first.** Every path that touches the
-hardware starts there — `--status`, `--dry-run` and 04's `--passive` included —
-and the default is deliberately not an option:
+### Which calibration is in use
+
+Every path that touches the hardware starts by resolving one. `--calib <path>`
+uses this gripper's own file:
 
 ```bash
 python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
-python3 examples/05_dual_control.py            # no --calib: it lists candidates
+python3 examples/05_dual_control.py            # no --calib: the SDK's factory file
 ```
 
-Without `--calib` the candidates in `~/.litegrip` are listed with their mtime and
-key values (closed/open angles, `rad_to_mm`, `kp`, `mst_id`) and you pick one by
-number, or type a path. The `*.sim.json` file the studio writes for its simulator
-backend and the `*.bak` backups are never offered, and a `*.sim.json` named
-explicitly is refused — its scale belongs to the simulated gripper. With no
-terminal to ask on (a pipe, a script, CI) or nothing to offer, the run stops and
-says how to get a calibration and how to pass one.
+With no `--calib`, the calibration shipped inside the SDK package
+(`factory_calibration.json`, alongside the `litegrip` package's `__init__.py`) is
+used, and the example says so when it starts. The path is resolved from the
+package directory, so it follows the checkout to any machine. **That file holds
+the factory's bench-fixture measurements, not measurements of your gripper**: its
+travel endpoints may not match the unit in front of you. Pass `--calib` for
+anything beyond a first look.
+
+Only when no factory file can be read either do the candidates in `~/.litegrip`
+get listed, with their mtime and key values (closed/open angles, `rad_to_mm`,
+`kp`, `mst_id`), and you pick one by number or type a path. The `*.sim.json` file
+the studio writes for its simulator backend and the `*.bak` backups are never
+offered, and a `*.sim.json` named explicitly is refused — its scale belongs to
+the simulated gripper. With no terminal to ask on (a pipe, a script, CI) or
+nothing to offer, the run stops and says how to get a calibration and how to pass
+one.
 
 The file comes from calibrating *this* gripper in the host software
 (`litegrip-studio` / `litegrip-console`, or the SDK's own
@@ -486,6 +521,26 @@ are self-consistent: the SDK's factory defaults ship an opening angle that
 contradicts its own `goto()` convention, and an uncalibrated unit is stopped with
 an explanation rather than driven with meaningless angles.
 
+## Shared helpers
+
+[`_common.py`](_common.py) is imported by all five examples and is not an example
+itself. It holds the argument parsers, the SDK discovery (`import_litegrip()`,
+`sdk_dir()`, `check_sdk_api()`), the calibration resolution
+(`choose_calibration_file()`, `factory_calibration_path()`, the candidate
+listing, the "did the file actually take effect" check), the connect/enable
+sequence (`open_real_gripper()`), `fresh_state()`, the unit conversions and the
+status line. Each example therefore starts with `from _common import ...`
+*before* importing `litegrip_pybullet`.
+
+`fresh_state(gripper, timeout_s=...)` is the only way to read a real position:
+`poll()` returns `True` only when a status frame for our motor was decoded in that
+call, so the snapshot taken straight after it is a measurement. **Do not** read
+`get_state(wait=False)` directly and treat it as a position — with no frame
+behind it, it returns the SDK's `0.0` initial value, which looks like a reading
+and is not one. There is deliberately no second freshness gate: this SDK exposes
+no public "is this snapshot backed by data" flag, and `poll()` is the whole
+signal.
+
 ## Notes
 
 **Where the grasp centre is.** `[0.0, 0.0, 0.0665]` m — between the finger faces,
@@ -494,16 +549,8 @@ an explanation rather than driven with meaningless angles.
 covered by `tests/test_sim.py`. `getAABB` inflates each link by roughly 3 mm, so
 never read the jaw opening from it; use `aperture_mm()`.
 
-**Shared helpers.** [`_common.py`](_common.py) holds the argument parsers, the two
-SDK discoveries (the freshness one for 04/05 and the trajectory one for 03), the
-calibration choice (`choose_calibration_file`, the candidate listing, the "did the
-file actually take effect" check), the connect/enable sequence, the unit
-conversions and the status line. It is not a fourth example — it is imported by the
-other four, which is why each starts with `from _common import ...` *before*
-importing `litegrip_pybullet`.
-
-**03 does not use `open_real_gripper`.** That helper runs `check_sdk_api` before it
-connects — the check for the *freshness* API, which the trajectory checkout does
-not have. 03 therefore repeats the connect/enable/calibrate sequence against the
-steps `_common` exports, minus that one check. If the two SDKs are ever merged
-into one checkout, this and `trajectory_sdk_dir()` both disappear.
+**03 connects through its own helper.** `_common.open_real_gripper()` imports the
+SDK itself, but 03 imports it in `main()` first so it can run the API check
+before anything else happens, and then passes that module to its own
+`open_gripper()`. The calibration, connect, verify and enable steps are the same
+ones; only the module's origin differs.

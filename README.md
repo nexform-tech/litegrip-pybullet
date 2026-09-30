@@ -1,9 +1,10 @@
 # litegrip-pybullet
 
 PyBullet simulation environment for the **LiteGrip lightweight robotic gripper
-series** — a physical model of the gripper, plus the five examples that go from
-reading the model to recording a motion on real hardware and replaying it into
-both the hardware and the simulation.
+series**: a physical model of the gripper that speaks the same *opening* as the
+real one, plus five runnable examples that go from reading the model to teaching
+the hardware a motion by hand and replaying it into the simulation and the
+gripper at the same time.
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -14,31 +15,201 @@ both the hardware and the simulation.
 | Model | Two parallel prismatic fingers, 42.726 mm travel each |
 | Jaw opening | 1.548 mm closed … 87.0 mm open |
 | Rated finger speed | 85 mm/s |
+| Hardware SDK | One `litegrip-python` checkout, shared by examples 03, 04 and 05 |
 | Python | 3.8+ |
+
+## Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Core API](#core-api)
+- [The five examples](#the-five-examples)
+- [Calibration](#calibration)
+- [Safety](#safety)
+- [Verification status](#verification-status)
+- [Troubleshooting](#troubleshooting)
+- [Related repositories](#related-repositories)
+- [Documentation](#documentation)
+- [Development](#development)
+- [License](#license)
+- [Contact](#contact)
+
+## Features
+
+### Simulation
+
+- **Bundled model**: the upstream ROS 2 xacro from `litegrip-urdf`, normalised
+  for PyBullet at load time (mesh paths rewritten, the massless root link
+  stripped) and shipped inside the package, so a fresh clone loads it with no
+  extra setup.
+- **One shared opening**: the only quantity the simulation and the hardware
+  agree on is the normalised opening (0 closed … 1 wide open). Every other
+  notation — joint travel, jaw gap, the SDK's calibrated millimetres — is
+  derived from it in `litegrip_pybullet.model`.
+- **Speed-limited travel**: the fingers ramp at the rated 42.73 mm/s each, so a
+  full stroke takes about 1 s and a commanded opening is reached without
+  overshoot.
+- **Force cap and friction grasping**: `command_fraction(..., force_n=...)` caps
+  the grip, and `add_box()` plus `contacts()` let a test check that the jaws
+  hold a part and slip when it pulls too hard.
+- **Kinematic mirroring**: `reset_fraction()` teleports the jaws (no dynamics,
+  no lag) so the simulation can display where a real gripper is right now.
+- **Headless and windowed**: `gui=False` runs the same physics through PyBullet's
+  DIRECT connection, which is what CI and `--headless` use.
+
+### Hardware examples
+
+- **Record and replay (03)**: teach a motion by hand in zero gravity, save it as
+  a `.lgt` file, then replay it into the hardware and the window together, or
+  into the window alone with `--play` (no connection, no frames sent).
+- **Mirror (04)**: the gripper drives the simulation, one read per frame, with
+  `--zero-gravity` for back-driving by hand and `--passive` for watching another
+  program drive it.
+- **Dual control (05)**: sliders command the hardware while the simulated jaws
+  mirror its measured position, with a speed cap and an optional feed-forward
+  grip force.
+- **Idle keep-alive**: all three hardware examples keep streaming hold frames
+  between moves, because an enabled motor that hears nothing latches a
+  communication-loss fault — see [Safety](#safety).
+- **Ramped targets**: position targets move one tick per frame and decelerate
+  before arrival, so the torque a frame demands does not depend on the
+  calibration's `kp` or on how fast a slider was dragged.
+- **Diagnostics without motion**: `05 --status` reads the error code and the DM
+  registers without enabling the motor or sending a motion command.
+
+### Calibration and startup checks
+
+- **Factory default**: with no `--calib`, the examples use the calibration
+  shipped inside the SDK package, resolved relative to the package directory, so
+  the same invocation works on another machine.
+- **Explicit override**: `--calib <path>` uses this gripper's own calibration.
+- **Verified before use**: the file is read and checked field by field, because
+  the SDK's own loader falls back to the shipped factory values *silently* when
+  the path it was given cannot be read.
+- **Picker fallback**: if no factory file can be read either, the examples list
+  the candidates on the terminal and ask.
+- **SDK API check**: each hardware example verifies at startup that the SDK
+  carries the members it calls and stops with the list of what is missing,
+  rather than failing inside a control loop.
+
+## Architecture
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│  your program · examples/01–05 · examples/_common.py          │
+└──────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│  litegrip_pybullet.sim — GripperSim                           │
+│  ├── command_fraction / command_joint / reset_fraction        │
+│  ├── settle / run_for / step                                  │
+│  ├── fraction / aperture_mm / finger_force_n                  │
+│  ├── add_box / contacts / grasp_center / link_aabb            │
+│  └── keyboard_events / mouse_events / status_text             │
+└──────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│  litegrip_pybullet.model — the unit boundary                  │
+│  fraction ↔ joint travel ↔ jaw gap ↔ SDK millimetres          │
+└──────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│  litegrip_pybullet.urdf — resolve and normalise               │
+│  bundled xacro / $LITEGRIP_URDF_PATH / $LITEGRIP_URDF_DIR     │
+└──────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    PyBullet (GUI or DIRECT) → URDF + STL
+```
+
+The three hardware examples add one more layer on top of `GripperSim`: the CAN
+loop they run themselves, over the SDK's public frame-level API
+(`send_mit_frame()` + `poll()`).
+
+### Core modules
+
+| Module | Responsibility |
+| --- | --- |
+| `src/litegrip_pybullet/sim.py` | `GripperSim`, `pressed()`, `clicked()`, the event and key constants |
+| `src/litegrip_pybullet/model.py` | `STROKE_M`, `N_FINGERS`, the aperture constants and every conversion between the notations |
+| `src/litegrip_pybullet/urdf.py` | URDF resolution (`resolve_urdf()`, `bundle_dir()`) and the PyBullet normalisation (`normalize_urdf()`) |
+| `src/litegrip_pybullet/assets/litegrip_urdf/` | The bundled xacro and STL meshes |
+| [`examples/_common.py`](examples/_common.py) | Argument parsers, SDK discovery, calibration choice, connect/enable, unit helpers, the status line |
+| [`examples/03_trajectory.py`](examples/03_trajectory.py) | Record on the gripper, replay into both |
+| [`examples/04_mirror_real.py`](examples/04_mirror_real.py) | Gripper → simulation |
+| [`examples/05_dual_control.py`](examples/05_dual_control.py) | Simulation → gripper |
 
 ## Install
 
+### 1. From a checkout (development)
+
 ```bash
-python3 -m pip install pybullet      # simulation
-python3 -m pip install -e .          # this package
+git clone https://github.com/nexform-tech/litegrip-pybullet.git
+cd litegrip-pybullet
+python3 -m venv .venv && source .venv/bin/activate
+python3 -m pip install -e ".[test]"
+python3 -m pytest -q
 ```
 
-The gripper model (URDF + STL meshes) is bundled, so nothing else is needed to
-load it. To touch real hardware the examples additionally need the `litegrip`
-SDK, which is **not on PyPI** — take it from a checkout. There are two of them,
-and the API is split across them (both report `__version__ == 2.2.0`, so read the
-capability, not the version):
+### 2. Plain install
 
-| Examples | Checkout | Editable install | Environment variable |
-| --- | --- | --- | --- |
-| 04, 05 | `lite-grip` | `python3 -m pip install -e /path/to/lite-grip` | `LITEGRIP_SDK_DIR` |
-| 03 | `litegrip-python` | `python3 -m pip install -e /path/to/litegrip-python` | `LITEGRIP_TRAJ_SDK_DIR` |
+```bash
+python3 -m pip install .
+```
 
-Without its own checkout an example stops at startup and names the SDK members it
-requires. `lite-grip` carries `refresh_status` / `data_age_s`; `litegrip-python`
-carries `record_start` / `play_start` / `Trajectory`.
+### 3. Build a wheel
+
+```bash
+python3 -m pip install build
+python3 -m build --wheel
+# the artifact lands in dist/
+```
+
+### Dependencies
+
+- **`pybullet>=3.2`** — the simulator.
+- **`numpy>=1.20`** — required explicitly because pybullet's wheel declares no
+  requirements of its own, yet importing it fails without numpy.
+- **`pytest>=7.0`** (`test` extra) — the test suite.
+
+The model needs nothing else: the URDF, the xacro and the STL meshes are bundled
+inside the package.
+
+### The hardware SDK (examples 03, 04 and 05)
+
+`litegrip` is **not on PyPI** — `pip install litegrip` installs something else,
+and no released version carries the API these examples use. All three hardware
+examples take it from one checkout,
+[`nexform-tech/litegrip-python`](https://github.com/nexform-tech/litegrip-python),
+resolved in this order:
+
+1. `$LITEGRIP_SDK_DIR` — pointing at the directory that *contains* the
+   `litegrip` package (`<repo>/src` in a src layout).
+2. A sibling checkout next to this repository: `../litegrip-python`, tried as
+   `src/` and then as the repository root.
+3. Whatever `litegrip` is installed in the running interpreter.
+
+```bash
+python3 -m pip install -e /path/to/litegrip-python
+# or
+export LITEGRIP_SDK_DIR=/path/to/litegrip-python/src
+```
+
+**Do not** point `LITEGRIP_SDK_DIR` at a directory without a `litegrip` package
+in it: the examples stop with an explanation instead of quietly importing a
+same-named package from somewhere else. Another repository ships a package
+called `litegrip` whose `__version__` is also 2.2.0 but which has no trajectory
+API, so the version number cannot tell them apart — the startup API check can,
+and it names every member that is missing.
 
 ## Quick start
+
+### Simulation only
 
 ```bash
 python3 examples/01_hello_sim.py --headless
@@ -47,12 +218,88 @@ python3 examples/01_hello_sim.py --headless
 ```python
 from litegrip_pybullet import GripperSim
 
-sim = GripperSim()                  # opens a window by default
+sim = GripperSim()                  # gui=False by default; pass gui=True for a window
 sim.command_fraction(0.0)           # 0 = closed, 1 = wide open
 sim.settle()                        # ~1 s, speed-limited at the rated 85 mm/s
 print(sim.aperture_mm(), sim.fraction(), sim.finger_force_n())
 sim.disconnect()
 ```
+
+### CAN bus setup
+
+Every hardware example needs a 1 Mbit/s SocketCAN interface (default `can0`):
+
+```bash
+sudo ip link set can0 up type can bitrate 1000000
+ip -details link show can0
+```
+
+### Real hardware
+
+```bash
+python3 examples/04_mirror_real.py                     # read only enough to mirror
+python3 examples/05_dual_control.py --dry-run           # the whole flow, no CAN traffic
+python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
+python3 examples/03_trajectory.py                       # record, then replay
+```
+
+> **Examples 03, 04 and 05 move real hardware.** Read
+> [Safety](#safety) and
+> [examples/README.md](examples/README.md#before-you-drive-the-hardware) first.
+
+## Core API
+
+### GripperSim
+
+| Method | Description |
+| --- | --- |
+| `GripperSim(urdf_path=None, *, gui=False, gravity=(0,0,-9.81), max_force_n=..., velocity_m_s=...)` | Connects PyBullet and loads the gripper; `gui=True` opens a window, `gui=False` uses DIRECT |
+| `command_fraction(fraction, *, force_n=None, velocity_m_s=None)` | Command a normalised opening, clamped to `[0, 1]` |
+| `command_joint(joint, *, force_n=None, velocity_m_s=None)` | Command a raw finger travel in metres, clamped to the URDF limits |
+| `reset_fraction(fraction)` | Teleport the jaws kinematically — the mirror path |
+| `step(n=1)` | Advance the simulation; returns `False` when the window was closed |
+| `run_for(seconds)` | Step for a wall-clock duration |
+| `settle(*, tolerance_m=..., timeout_s=3.0)` | Step until the target is reached; returns `(seconds, reached)` |
+| `fraction()` / `aperture_mm()` / `joint_values()` / `finger_force_n()` | The current state |
+| `add_box(half_extents, position, ...)` | Add a graspable part |
+| `contacts(other_body)` | Contacts between a part and the gripper |
+| `status_text(text)` | Write a line into the window |
+| `keyboard_events()` / `mouse_events()` | Poll input; `pressed()` and `clicked()` interpret them |
+| `disconnect()` | Close the window and the PyBullet connection |
+
+### Unit conversions
+
+The simulation and the hardware meet at the normalised opening, so the
+conversions live in one module rather than in each example.
+
+| Function | Description |
+| --- | --- |
+| `fraction_to_joint(fraction)` / `joint_to_fraction(joint)` | Normalised opening ↔ finger travel in metres |
+| `fraction_to_aperture_mm(fraction)` / `joint_to_aperture_mm(joint)` | Jaw gap in millimetres, the distance a pair of calipers would measure |
+| `sdk_mm_to_fraction(mm, max_stroke_mm=120.0)` / `fraction_to_sdk_mm(...)` | The SDK's *calibrated* millimetres |
+| `clamp_fraction(fraction)` | Clamp to `[0, 1]` |
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `STROKE_M` | `0.042726` m | Travel of one finger, full stroke |
+| `N_FINGERS` | `2` | Parallel fingers |
+| `APERTURE_CLOSED_MM` / `APERTURE_OPEN_MM` | `1.548` / `87.0` mm | Jaw gap at either end |
+| `MAX_GRIP_FORCE_N` | `40.0` N | The library's force ceiling |
+| `DEFAULT_MAX_STROKE_MM` | `120.0` mm | The SDK's default calibrated scale |
+
+**SDK millimetres and the jaw gap are different quantities, not a unit
+conversion apart.** `120` is the SDK's *default* `max_stroke_mm`; a calibration
+file carries whatever scale it was saved with, and `rad_to_mm` is derived at
+calibration time from a stroke length the loader never writes back. The examples
+therefore convert between radians and the normalised opening directly. See
+[One opening, three notations](examples/README.md#one-opening-three-notations).
+
+### URDF resolution
+
+`resolve_urdf(path)` tries, in order: an explicit path, `$LITEGRIP_URDF_PATH`,
+`$LITEGRIP_URDF_DIR`, the bundled copy, then a sibling `litegrip-urdf` checkout.
+Pointing the library at a different gripper model is therefore an environment
+variable, not a code change. An unfindable model raises `UrdfError`.
 
 ## The five examples
 
@@ -64,31 +311,138 @@ sim.disconnect()
 | [`examples/04_mirror_real.py`](examples/04_mirror_real.py) | gripper → simulation | Yes, to actually mirror |
 | [`examples/05_dual_control.py`](examples/05_dual_control.py) | simulation → gripper | Yes, to actually move |
 
-See [examples/README.md](examples/README.md) for what each one demonstrates and
-the notation they all share.
+01 moves nothing at all: `tests/test_examples_cli.py` parses it and refuses it
+any motion call. 03's `--play` is the one hardware-example path that runs without
+a gripper, and the only one CI can run — in the runs where a checkout is present
+to write the fixture with.
 
-## One opening, three notations
+### Suggested learning path
 
-Mixing these up is the usual source of confusion, so the library converts through
-a single normalised opening (0 closed … 1 wide open):
+```text
+01_hello_sim.py        read the model, move nothing        (no hardware)
+  ↓
+02_move_sim.py         speed-limited motion                (no hardware)
+  ↓
+03_trajectory.py --play <file>   offline replay            (no hardware)
+  ↓
+04_mirror_real.py      the gripper drives the window       (hardware, read-mostly)
+  ↓
+05_dual_control.py --dry-run     the flow, no CAN traffic
+  ↓
+05_dual_control.py     the window drives the gripper       (hardware, moves)
+  ↓
+03_trajectory.py       record by hand, replay to both      (hardware, moves)
+```
 
-| Notation | Range | Meaning |
+See [examples/README.md](examples/README.md) for what each one demonstrates, and
+for the notation they all share.
+
+## Calibration
+
+Every path that touches the hardware has to decide which calibration to use,
+because the angles and the millimetre scale are measured per gripper.
+
+### The factory default
+
+With no `--calib`, the examples use the calibration shipped inside the SDK
+package — `factory_calibration.json`, next to the `litegrip` package's own
+`__init__.py`. The path is derived from the package directory, never hard-coded,
+so the same command works on another machine or in another virtual environment.
+
+**That file holds the factory's bench-fixture measurements, not measurements of
+your gripper.** It is a usable default, and its travel endpoints may not match
+the unit in front of you. For anything beyond a first look, pass `--calib`.
+
+### Overriding it
+
+```bash
+python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
+```
+
+The file comes from calibrating *this* gripper in the host software
+(`litegrip-studio` / `litegrip-console`, or the SDK's own
+`tools/gui/litegrip_gui.py`) and saving it. The examples read it themselves and
+check it took effect field by field, refuse a file whose `can_id`/`mst_id` name a
+different motor, and stop with an explanation on a file whose angles contradict
+each other. The SDK's own `load_calibration()` is not trusted for this: with an
+unreadable path it loads the shipped factory values *silently* and still returns
+`True`, so a mistyped path would otherwise drive the motor with another
+machine's angles.
+
+### The candidate picker
+
+If neither `--calib` nor a readable factory file is available, the examples list
+the candidates in `~/.litegrip` with their modification time and key values
+(closed/open angles, `rad_to_mm`, `kp`, `mst_id`) and ask which one to use. The
+`*.sim.json` file the studio writes for its simulator backend and the `*.bak`
+backups are never offered, and a `*.sim.json` named explicitly is refused — that
+scale belongs to the simulated gripper. With no terminal to ask on (a pipe, a
+script, CI) the run stops and explains how to get a calibration.
+
+## Safety
+
+### Speed and force limits
+
+| Limit | Value | Where it is enforced |
 | --- | --- | --- |
-| Joint value | `0 … 0.042726` m | prismatic travel of one finger; `0` is wide open |
-| Normalised opening | `0 … 1` | the one shared quantity |
-| SDK millimetres | `0 … 120` mm | the *calibrated* scale the hardware reports |
-| Jaw gap | `1.548 … 87` mm | physical distance between the finger faces |
+| Finger speed | 42.73 mm/s each, 85 mm/s jaw | `velocity_m_s` in `GripperSim`, default 42.73 mm/s |
+| Grip force | 10 N by default, 40 N rated maximum | `DEFAULT_MAX_FORCE_N`, `MAX_GRIP_FORCE_N`; override per command with `force_n` |
+| Position-target step | one ramp tick per frame | examples 03, 04 and 05 |
 
-SDK millimetres and the physical jaw gap are not related by a unit conversion —
-they are different quantities. Only the normalised opening means the same thing
-on both sides.
+### Hold frames and the 0xD communication-loss fault
 
-The `120` is the SDK's *default* `max_stroke_mm`; a calibration file carries
-whatever scale it was saved with, so the examples convert between radians and the
-normalised opening directly rather than through millimetres. See
-[One opening, three notations](examples/README.md#one-opening-three-notations).
+An **enabled** motor that hears nothing for about **0.9 s** latches the
+communication-loss fault (`0xD`, which the SDK's `describe_error` names
+`通讯丢失 (CAN 超时)`). The symptom is the one people report as "it reads the
+position but won't take commands, red LED blinking": the position still reads,
+and every command is silently ignored. **A quiet idle period is itself the fault
+cause.**
 
-## Status
+The 0.9 s is a measurement on this hardware. Do **not** derive it from the
+`TIMEOUT` register (RID 9): that register read 8000 ms on one occasion and 0
+(currently inactive) on another, and the SDK marks it unresolved. `--status`
+prints the register's live value for the record and says so next to it.
+
+All three hardware examples therefore stream hold frames at 200 Hz through every
+gap in which nothing else is feeding the motor — target = the measured position,
+zero feed-forward, no motion commanded. 03 does it between its recording and
+replay phases; 04's `--passive` opts out entirely when another program is driving
+the bus, and does not enable the motor either.
+
+While a recording or a replay is running, the SDK is streaming the bus from its
+own thread. **Do not** insert frames of your own at the same time: a second
+stream on the same wire tears the trajectory apart.
+
+### Step commands and the 0x9/0xA fault
+
+The MIT position term is `kp × (q_target − q_actual)`, and `kp` is an entry in
+the calibration file rather than a constant. Sending a whole target in one frame
+asks the motor for `kp × 1.845 rad` — about 185 Nm at the SDK's default
+`kp = 100`, against a motor rated around 10 Nm. The current saturates and the
+motor latches an under-voltage/over-current fault (0x9/0xA), after which it keeps
+reporting its position while ignoring commands.
+
+Example 05 ramps the *position target* one tick per frame instead, which bounds
+the demand whatever `kp` is configured to — at this machine's `kp = 5.0` the same
+step asks for about 9 Nm. It also decelerates before arrival, because a frame
+that drops the target velocity from full speed to zero reverses the damping term
+into a `kd × v` torque step.
+
+Both faults are latched: they do not clear by themselves until the gripper is
+power-cycled. They can be read and cleared without moving the motor:
+
+```bash
+python3 examples/05_dual_control.py --status                  # read only, no motion command
+python3 examples/05_dual_control.py --status --clear-fault    # disable → clear → enable
+```
+
+`--status` does not open a window and does not enable the motor. On an
+unpowered motor it cannot read a position at all — a disabled motor sends no
+status frames — and that is reported as "cannot tell", exit 0, not as a fault;
+the DM registers are still read. Only `--clear-fault` sends frames, and its
+disable → clear → enable sequence leaves the fingers limp for an instant.
+
+## Verification status
 
 What has been verified, and what has not:
 
@@ -100,52 +454,69 @@ What has been verified, and what has not:
 | Force cap and friction grasping | ✅ Verified | `tests/test_sim.py`: holds 5 N against a 10 N grip, slips at 15 N; only the fingers touch the part |
 | Examples 01–02 (simulation only) | ✅ Verified | Both run headless and exit 0, with their output asserted in `tests/test_examples_cli.py`; 01 is additionally parsed and refused any motion call |
 | Example 03 `--play` (offline replay) | ✅ Verified | Reads a `.lgt`, drives the window from it, sends nothing: run headless and exit 0, asserted end to end in `tests/test_example03_loop.py` and against a real file in `tests/test_examples_cli.py` |
-| Example 03 recording and hardware replay | ⚠️ **Not verified** | Neither has been run against a gripper: each one moves real hardware, and the recording SDK landed on this machine the same day. The sample-rate, pose-conversion, hold-frame and "confirm before the replay" logic is covered by `tests/test_example03_loop.py` against a stand-in SDK |
+| One SDK checkout, factory-calibration default | ✅ Verified (no hardware) | `tests/test_common.py` covers the resolution order (`$LITEGRIP_SDK_DIR` → sibling → installed), the loud failure on a wrong `LITEGRIP_SDK_DIR`, `factory_calibration_path()` resolving through the package, and the three-tier calibration choice; `tests/test_examples_cli.py` covers the paths end to end |
+| Example 03 recording and hardware replay | ⚠️ **Not verified** | Neither has been run against a gripper: each one moves real hardware. The sample-rate, pose-conversion, hold-frame and "confirm before the replay" logic is covered by `tests/test_example03_loop.py` against a stand-in SDK |
 | Example 03's "click the window" go-ahead | ⚠️ **Partly verified** | The keyboard half is unit-tested; on the mouse half `getMouseEvents()` was called in a real window (0 events, no error) but **nobody has actually clicked** — the 5-tuple `clicked()` reads is taken from pybullet's own `pybullet_examples/createVisualShapeArray.py` |
-| Example 04 (hardware → simulation) | ⚠️ **Partially verified** | The read-only mirror path was run against a real gripper on `can0`; `--zero-gravity` and `--passive` were not |
-| Example 05 (simulation → hardware) | ⚠️ **Partially verified** | Run against a real gripper on `can0`, where it latched a motor fault; the ramp fix below is covered by `tests/test_example05_stream.py` but has **not** itself been run against hardware. The drag-driven interaction (no send key, an enabled-but-stationary start, the speed slider) has likewise only been exercised in tests, as have the travel-normalised slider mapping and the deceleration before arrival |
-| Example 05 `--status` diagnostics | ⚠️ **Partially verified** | On a real gripper on 2026-09-28 it read a live status frame, the position, the error code and the DM registers without enabling or moving the motor (exit 0); the reporting path for a **latched fault**, and clearing one, have not been exercised on hardware |
+| Example 04 (hardware → simulation) | ⚠️ **Partially verified** | The read-only mirror path was run against a real gripper on `can0` **with the other SDK checkout** — the one this repository no longer uses. `--zero-gravity` and `--passive` were not run at all, and the same paths have not been re-run against `litegrip-python` |
+| Example 05 (simulation → hardware) | ⚠️ **Partially verified** | Run against a real gripper on `can0`, where it latched a motor fault; the ramp fix is covered by `tests/test_example05_stream.py` but has **not** itself been run against hardware. The drag-driven interaction, the travel-normalised slider mapping and the deceleration before arrival have only been exercised in tests |
+| Example 05 `--status` diagnostics | ⚠️ **Partially verified** | On a real gripper on 2026-09-28 it read a live status frame, the position, the error code and the DM registers without enabling or moving the motor (exit 0) — again with the other SDK checkout. The reporting path for a **latched fault**, clearing one, and the new "disabled motor, no position readable, exit 0" behaviour have not been exercised on hardware |
 | Real-hardware motion commands | ⚠️ **Partially verified** | A step-command stream was sent to hardware from an earlier revision of example 05 and faulted the motor; the ramped replacement has not been run yet |
 | Idle keep-alive (`IdleKeeper`, 04's hold frames) | ⚠️ **Partially verified** | Unit-tested for cadence and for the gap staying under the timeout; **never run against hardware** |
 
-"Reads the position but won't take commands, red LED blinking" has two lookalike
-causes on this hardware:
-
-- **A step command** (the whole target in one frame): the MIT position term
-  `kp × (q_target − q_actual)` over a 1.845 rad travel asks for ~185 Nm from a
-  ~10 Nm motor at the SDK's default `kp = 100 Nm/rad`, which latches an
-  under-voltage/over-current fault (0x9/0xA). `kp` is a calibration entry, not a
-  constant — at this machine's present 5.0 the same step asks for ~9 Nm — so
-  example 05 ramps the *position target* like the SDK's own `goto_rad`, one tick
-  per frame, which bounds the demand whatever `kp` is.
-- **Idling too long**: an enabled motor latches a communication-loss fault
-  (**0xD**, which the SDK's `describe_error` now names `通讯丢失 (CAN 超时)`)
-  after roughly **0.9 s** of silence — the SDK's own measurement on this
-  hardware. **A quiet idle period is itself the fault cause**, and it was the
-  dominant one behind "simulation can read the gripper but not control it." The
-  `TIMEOUT` register (RID 9) does not give that duration — it read 8000 ms on
-  2026-09-24 and 0 ms (watchdog off) on 2026-09-28, and the SDK marks it
-  unresolved; `--status` prints the live value without drawing a conclusion from
-  it. All three hardware examples keep sending hold frames (target = measured
-  position, zero feed-forward) while idle regardless — 03 in the gaps between its
-  recording and replay phases; 04's `--passive` opts out of that when another
-  program is driving the bus.
-
-Both faults are diagnosed and cleared without moving the motor via
-`examples/05_dual_control.py --status [--clear-fault]`.
-
-Every example path that touches the hardware also has to be told which
-calibration file to use: pass `--calib <path>`, or let it list the candidates on
-a terminal and pick one. The default is deliberately not accepted, because the
-SDK's `load_calibration` falls back to the shipped factory calibration *silently*
-when the path it was given cannot be read. Calibrate this gripper in the host
-software and save the file from there — see
-[examples/README.md](examples/README.md#before-you-drive-the-hardware).
-
-The simulation dynamics are PyBullet's, with the URDF's own inertias. The
-finger speed limit and the force cap are enforced by this library; the reported
-servo settling time is a measured property of the simulated position servo, not a
+The simulation dynamics are PyBullet's, with the URDF's own inertias. The finger
+speed limit and the force cap are enforced by this library; the reported servo
+settling time is a measured property of the simulated position servo, not a
 hardware measurement.
+
+## Troubleshooting
+
+### CAN does not come up
+
+```bash
+ip link show can0
+sudo ip link set can0 up type can bitrate 1000000
+ip -details link show can0
+```
+
+The examples default to `can0` and CAN ID `0x08`; `--channel` and `--can-id`
+change both. A USB-CAN adapter that disappears mid-run shows up as `ENOBUFS`
+from `enable()` — that is the adapter, not the gripper.
+
+### "It reads the position but won't take commands", red LED blinking
+
+Two lookalike causes, both described under [Safety](#safety): a step command
+(0x9/0xA) or an idle gap longer than the watchdog (0xD). Diagnose without moving
+the motor:
+
+```bash
+python3 examples/05_dual_control.py --status
+python3 examples/05_dual_control.py --status --clear-fault
+```
+
+### A second master on the same bus
+
+Two streams on one interface fight, and neither side wins. Check nothing else
+has the interface open before running a hardware example:
+
+```bash
+pgrep -af python3 | grep -i litegrip        # who has CAN open
+ip -details -statistics link show can0      # counters climbing while you run nothing?
+```
+
+`ip link set can0 down` / `up` does **not** evict that program — its socket
+survives and resumes when the interface returns. The process has to exit.
+
+### The examples cannot find the SDK
+
+```text
+找不到真机 SDK（litegrip 包）：LITEGRIP_SDK_DIR 指到 /path,但那里没有 litegrip/__init__.py。
+```
+
+The variable names the directory that *contains* the `litegrip` package, not the
+package directory and not the repository root. Either unset it, or point it at
+`<repo>/src`. `$LITEGRIP_TRAJ_SDK_DIR` no longer exists: all three hardware
+examples use the same checkout now, so a script that still sets it should set
+`LITEGRIP_SDK_DIR` instead.
 
 ## Related repositories
 
@@ -157,6 +528,12 @@ hardware measurement.
 | [litegrip-urdf](https://github.com/nexform-tech/litegrip-urdf) | URDF/xacro description package |
 | [litegrip-docs](https://github.com/nexform-tech/litegrip-docs) | Product documentation |
 
+## Documentation
+
+- [Example guide](examples/README.md) — what each of the five examples
+  demonstrates, the notation they share, and the checklist before driving
+  hardware.
+
 ## Development
 
 ```bash
@@ -164,9 +541,11 @@ python3 -m pip install -e ".[test]"
 python3 -m pytest -q
 ```
 
-The URDF is resolved from a bundled copy by default. To point the library at a
-different model, in order of precedence: an explicit `urdf_path`, `$LITEGRIP_URDF_PATH`,
-`$LITEGRIP_URDF_DIR`, the bundled copy, then a sibling `litegrip-urdf` checkout.
+The suite needs no CAN interface and no display: it skips hardware entirely and
+runs PyBullet headless. The no-SDK case is part of it — with no checkout
+anywhere, `tests/test_examples_cli.py` still asserts that each example stops with
+a readable message instead of a traceback. That is the state CI runs in, where
+`litegrip` is not installed at all.
 
 ## Repository standards
 
@@ -178,3 +557,8 @@ automated semantic-release versioning on every merge to `main`.
 
 Copyright © 2026 NEXFORM ROBOTICS. Licensed under the
 [Apache License 2.0](LICENSE).
+
+## Contact
+
+- Repository: [github.com/nexform-tech/litegrip-pybullet](https://github.com/nexform-tech/litegrip-pybullet)
+- Issues: [github.com/nexform-tech/litegrip-pybullet/issues](https://github.com/nexform-tech/litegrip-pybullet/issues)
