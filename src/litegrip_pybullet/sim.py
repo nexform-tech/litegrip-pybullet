@@ -60,6 +60,8 @@ __all__ = [
     "DEFAULT_SETTLE_TOLERANCE_M",
     "QUIT_KEYS",
     "CONFIRM_KEYS",
+    "MOUSE_PRESS",
+    "MOUSE_LEFT_BUTTON",
 ]
 
 #: Physics step.  1/500 s tracks the ~85 mm/s stroke smoothly and still settles
@@ -77,6 +79,16 @@ DEFAULT_VELOCITY_M_S = STROKE_M
 #: PyBullet keyboard codes (GLFW) — Esc/Q quit, Enter/Space confirms.
 QUIT_KEYS = (27, ord("q"), ord("Q"))
 CONFIRM_KEYS = (p.B3G_RETURN, p.B3G_SPACE)
+
+#: PyBullet reports a mouse event as ``(event type, x, y, button, state)``.  A
+#: button press is event type :data:`MOUSE_PRESS`, the left button is index
+#: :data:`MOUSE_LEFT_BUTTON`.  Both values come from PyBullet's own example:
+#: ``pybullet_examples/createVisualShapeArray.py`` is the only place the layout
+#: is written down.  Nothing here emits mouse events — these describe the ones
+#: the window sends back, and a camera drag starts with the same press, so a
+#: user rotating the view has "clicked" too (see :func:`clicked`).
+MOUSE_PRESS = 2
+MOUSE_LEFT_BUTTON = 0
 
 #: Default ``settle`` tolerance [m].  Tight on purpose: the ramp moves the
 #: setpoint by up to ``velocity × time_step`` (85 µm) per step, so a tolerance
@@ -516,6 +528,19 @@ class GripperSim:
         except Exception:  # pragma: no cover - window closed mid-frame
             return {}
 
+    def mouse_events(self) -> List[Sequence[float]]:
+        """Mouse events from the window this frame, or ``[]`` when headless.
+
+        Each event is PyBullet's own 5-tuple; pass the list to :func:`clicked`
+        rather than reading the tuple here.
+        """
+        if not self._gui or not self.connected():
+            return []
+        try:
+            return list(p.getMouseEvents(physicsClientId=self._cid))
+        except Exception:  # pragma: no cover - window closed mid-frame
+            return []
+
     def disconnect(self) -> None:
         """Close the PyBullet connection if this object opened it."""
         if self._owns_connection and self.connected():
@@ -531,3 +556,22 @@ def pressed(events: Dict[int, int], keys: Sequence[int]) -> bool:
     ``keys`` are PyBullet/GLFW key codes, e.g. :data:`QUIT_KEYS`.
     """
     return any(events.get(key, 0) & p.KEY_WAS_TRIGGERED for key in keys)
+
+
+def clicked(events: Sequence[Sequence[float]]) -> bool:
+    """True if the left button went down in a :meth:`GripperSim.mouse_events`.
+
+    This is the test PyBullet's own example makes on the 5-tuple: event type
+    :data:`MOUSE_PRESS`, button :data:`MOUSE_LEFT_BUTTON`, state carrying
+    ``KEY_WAS_TRIGGERED``.
+
+    It says a button went down, not that the user meant to click: dragging to
+    rotate the camera begins with the same event, and the rest of the drag
+    looks like mouse *moves*.  A caller that lets this start a motion should
+    say so in its own prompt — otherwise whoever is holding the gripper can
+    set it moving by steadying the view while they wait.
+    """
+    return any(event[0] == MOUSE_PRESS
+               and event[3] == MOUSE_LEFT_BUTTON
+               and event[4] & p.KEY_WAS_TRIGGERED
+               for event in events)

@@ -34,12 +34,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# `litegrip` is not on PyPI — examples 02/03 need it from a checkout
-# (`pip install -e /path/to/lite-grip`, $LITEGRIP_SDK_DIR, or a sibling
-# lite-grip directory), and no released version carries the public API they
-# require (LiteGrip.refresh_status, GripperState.data_age_s/has_data/is_stale).
-# This extra can therefore only be satisfied by a local or org index; the real
-# guard is the startup check in examples/_common.py:check_sdk_api().
+# `litegrip` is not on PyPI. The three hardware examples (03/04/05) need it from
+# a checkout — `pip install -e /path/to/litegrip-python`, $LITEGRIP_SDK_DIR, or a
+# sibling litegrip-python directory — and the package they require is the one
+# with the trajectory API (nexform-tech/litegrip-python). Another repository
+# ships a same-named package whose `__version__` is also 2.2.0 but which lacks
+# record_start/play_start, so this extra can only be satisfied by a local or org
+# index; the real guard is the startup check in
+# examples/_common.py:check_sdk_api().
 hardware = ["litegrip>=2.2"]
 test = ["pytest>=7.0"]
 

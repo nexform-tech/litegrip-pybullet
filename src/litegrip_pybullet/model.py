@@ -24,8 +24,8 @@ quantity both sides agree on::
     joint    = STROKE_M * (1 - fraction)
     sdk_mm   = fraction * max_stroke_mm
 
-The fraction is also what the real-time programs exchange: ``02_sim_to_real``
-takes the fraction from the simulated jaws, ``03_real_to_sim`` derives it from
+The fraction is also what the real-time programs exchange: ``05_dual_control``
+takes the fraction from the simulated jaws, ``04_mirror_real`` derives it from
 ``get_state().position_mm``.
 """
 
