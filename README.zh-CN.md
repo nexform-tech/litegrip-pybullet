@@ -387,8 +387,9 @@ python3 examples/05_dual_control.py --status                  # 只读，不发�
 python3 examples/05_dual_control.py --status --clear-fault    # disable → clear → enable
 ```
 
-`--status` 不开窗口、不使能。电机没使能时它**根本读不到位置**——未使能的电机不发状态
-帧——这时它报的是「判不了」、退出码 0，而不是故障；DM 寄存器照读。只有 `--clear-fault`
+`--status` 不开窗口、不使能、也不发任何指令帧。状态帧是**回**出来的——DM 电机收到一条
+指令帧才回一帧，使能与否都一样——一条不发就没有可回的东西，所以它**根本读不到位置**。
+这时它报的是「判不了」、退出码 0，而不是故障；DM 寄存器照读。只有 `--clear-fault`
 会发帧，而它的 disable → clear → enable 中间那一瞬间手指是失力的。
 
 ## 验证状态
