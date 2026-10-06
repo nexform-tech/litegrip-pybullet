@@ -160,6 +160,13 @@ class FakeSim:
         self.steps_left = steps
         self.quit_at = quit_at
         self.tick = 0
+        #: A hard ceiling on loop passes.  ``step()`` is the only thing that
+        #: decrements ``steps_left``, so any branch that ``continue``s past it
+        #: makes ``connected()`` true forever — the loop then spins instead of
+        #: ending, and the test *hangs* rather than reporting a failure.  That
+        #: is exactly what example 05 did while a drag was starved, so the
+        #: budget turns a regression into a fast, readable failure.
+        self.max_passes = steps * 2 + 100
         self.urdf_path = "fake.urdf"
         #: Every ``reset_fraction`` the loop asked for — the mirror.  There is no
         #: ``command_fraction`` on this fake on purpose: the loop must not be
@@ -179,6 +186,13 @@ class FakeSim:
     def keyboard_events(self):
         # pybullet's shape: {key: bitmask}; ``pressed`` tests it with ``.get``.
         self.tick += 1
+        assert self.tick <= self.max_passes, (
+            f"主循环跑了 {self.tick} 圈还没结束（上限 {self.max_passes} 圈，"
+            f"而 steps_left 还剩 {self.steps_left}）：有分支跳过了 sim.step()，"
+            "所以 steps_left 永远减不到 0。那不只是测试卡住——真机上同一个分支还"
+            "跳过了发帧块，电机静默 0.9 s 就锁 0xD 故障，而且窗口再也不刷新、退出键"
+            "也读不到。"
+        )
         if self.quit_at is not None and self.tick == self.quit_at:
             self.keys_emitted += 1
             return {key: KEY_WAS_TRIGGERED for key in ex02.QUIT_KEYS}
@@ -209,15 +223,21 @@ class FakeSliders:
     what a mouse drag looks like from the loop's side: the value simply
     changes.  Nothing else about it changes, which is how a slider the user has
     *not* touched stays a non-command.
+
+    With ``drag_step`` set the slider keeps moving by that much (in fraction)
+    on every read from ``drag_tick`` on — a mouse held down and moved, which is
+    the case where the loop stays in its drag branch for iteration after
+    iteration.
     """
 
     def __init__(self, drag_to: float | None = None, drag_tick: int | None = None,
-                 tick_fn=None) -> None:
+                 tick_fn=None, drag_step: float | None = None) -> None:
         self.values: dict[int, float] = {}
         self.created: list[tuple] = []
         self.drag_to = drag_to
         self.drag_tick = drag_tick
         self.tick_fn = tick_fn
+        self.drag_step = drag_step
 
     def addUserDebugParameter(self, name, lo, hi, start):   # noqa: N802 (pybullet)
         index = len(self.created) + 1
@@ -226,9 +246,12 @@ class FakeSliders:
         return index
 
     def readUserDebugParameter(self, index):                # noqa: N802 (pybullet)
-        if index == 1 and self.drag_to is not None and self.tick_fn is not None \
+        if index == 1 and self.tick_fn is not None and self.drag_tick is not None \
                 and self.tick_fn() >= self.drag_tick:
-            self.values[1] = self.drag_to * 100.0
+            if self.drag_step is not None:
+                self.values[1] += self.drag_step * 100.0
+            elif self.drag_to is not None:
+                self.values[1] = self.drag_to * 100.0
         return self.values[index]
 
 
@@ -239,13 +262,13 @@ CALIB_FILE = dict(zero_position_rad=POS_CLOSED_RAD, max_position_rad=POS_OPEN_RA
 
 
 def _run(monkeypatch, gripper=None, steps=40, drag_to=None, drag_tick=3,
-         quit_at=None, clock=None, speed=100.0, dry_run=False):
+         quit_at=None, clock=None, speed=100.0, dry_run=False, drag_step=None):
     """Run ``example 05``'s ``main()`` against fakes; return the pieces."""
     clock = clock or FakeClock()
     gripper = gripper or FakeGripper(position_rad=POS_OPEN_RAD + 0.3)
     sim = FakeSim(clock, steps, quit_at=quit_at)
     sliders = FakeSliders(drag_to=drag_to, drag_tick=drag_tick,
-                          tick_fn=lambda: sim.tick)
+                          tick_fn=lambda: sim.tick, drag_step=drag_step)
 
     args = SimpleNamespace(
         channel="can0", can_id=0x08, mst_id=0x18, calib=None,
@@ -465,6 +488,101 @@ class PollSchedule(FakeGripper):
     def poll(self, timeout_s: float = 0.0) -> bool:
         self.polls += 1
         return bool(self.answer(self.polls))
+
+
+class CommandDrivenGripper(FakeGripper):
+    """A motor that answers the commands it is sent, and nothing else.
+
+    This is the behaviour measured on the real gripper on 2026-09-30: an enabled
+    DM motor does *not* stream status frames on its own — it returns one frame
+    per command frame it receives.  The distinction matters because a loop that
+    waits for a frame it has not triggered waits forever, and ``_common``'s
+    ``fresh_state`` (and the comments that used to say otherwise) assumed the
+    opposite.
+
+    ``replies`` counts the answers not yet read.  It starts at ``backlog``,
+    standing for what ``enable()`` left in the socket buffer by streaming its
+    hold frames — the reason the first read after enabling succeeds on hardware.
+    ``send_mit_frame`` adds one; a read takes one away.  ``get_state(wait=False)``
+    also takes one, because in the SDK it *is* a ``poll`` (``gripper.py``:
+    ``self._can.poll(timeout_s=0.0)``), and that drain is what empties the buffer
+    by the time the drag branch comes to wait.
+    """
+
+    def __init__(self, backlog: int = 2, clock=None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.replies = backlog
+        self.clock = clock
+        #: When each frame went out, for the watchdog-gap check.
+        self.stamps: list[float] = []
+
+    def poll(self, timeout_s: float = 0.0) -> bool:
+        self.poll_timeouts.append(timeout_s)
+        if self.replies <= 0:
+            return False
+        self.replies -= 1
+        return True
+
+    def get_state(self, wait: bool = True):
+        if not wait:
+            self.poll(timeout_s=0.0)
+        return super().get_state(wait)
+
+    def send_mit_frame(self, q, kp, kd, dq=0.0, tau=0.0) -> bool:
+        self.replies += 1
+        if self.clock is not None:
+            self.stamps.append(self.clock.now)
+        return super().send_mit_frame(q, kp, kd, dq, tau)
+
+
+class TestTheMotorOnlyAnswersCommands:
+    """A starved drag must feed the motor, then wait — in that order.
+
+    On the real gripper (2026-09-30) dragging the slider printed four blocks of
+    "读不到真机的状态帧" and never a single ``[拖动 #N]``: the drag branch waited
+    for a frame in a loop iteration where nothing had been sent yet (the send
+    block sits at the end of the loop and its ``continue`` skipped it), so the
+    motor had nothing to answer.  Every starved pass also sent nothing at all,
+    which walks the motor toward the 0xD communication-loss fault.
+    """
+
+    def test_a_starved_drag_feeds_the_motor_and_then_goes(self, monkeypatch, capsys):
+        clock = FakeClock()
+        gripper = CommandDrivenGripper(backlog=4, clock=clock,
+                                       position_rad=POS_OPEN_RAD + 0.3)
+        run = _run(monkeypatch, gripper=gripper, clock=clock, steps=400,
+                   drag_to=0.9, drag_tick=5)
+        out = capsys.readouterr().out
+        assert "拖动 #1" in out, f"补发保活帧之后拖动还是没起来：\n{out}"
+        assert "不下发" not in out, "拖动时还在报读不到状态帧"
+
+    def test_it_keeps_sending_while_the_read_starves(self, monkeypatch):
+        """Even a starved pass has to put a frame on the bus.
+
+        The drag is held (``drag_step``), so the loop stays in the drag branch
+        for iteration after iteration: without a frame per pass, the motor goes
+        silent until the 0xD watchdog trips — which on the real gripper means
+        "reads position, ignores every command, red LED".
+        """
+        clock = FakeClock()
+        gripper = CommandDrivenGripper(backlog=4, clock=clock,
+                                       position_rad=POS_OPEN_RAD + 0.3)
+        run = _run(monkeypatch, gripper=gripper, clock=clock, steps=400,
+                   drag_tick=5, drag_step=0.001)
+        assert len(gripper.stamps) >= 2
+        worst = max(b - a for a, b in zip(gripper.stamps, gripper.stamps[1:]))
+        assert worst < WATCHDOG_S, f"最长间隔 {worst:.3f} s，够把电机锁进 0xD 了"
+        assert clock.now - gripper.stamps[-1] < WATCHDOG_S, \
+            "拖动开始之后就没帧了——静默下去电机要锁 0xD"
+
+    def test_it_still_refuses_without_an_established_frame(self, monkeypatch, capsys):
+        """补发的前提是「有那条已经定下来的帧」——没有就一帧都不发。"""
+        gripper = CommandDrivenGripper(backlog=0, position_rad=POS_OPEN_RAD + 0.3)
+        run = _run(monkeypatch, gripper=gripper, steps=300, drag_to=0.9,
+                   drag_tick=5)
+        assert gripper.frames == [], \
+            f"没有定下来的帧还是造了 {len(gripper.frames)} 帧"
+        assert "不下发" in capsys.readouterr().out
 
 
 class TestItWillNotActOnAnUnmeasuredPosition:

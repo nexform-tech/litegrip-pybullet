@@ -405,8 +405,11 @@ def hold_frame(gripper):
     动，发错目标会，所以读不到就返回 ``None``，调用方负责不发。
 
     本函数**不会**去催电机开口（旧版发过一帧只读的 ``0xCC`` 状态请求，那条路已经
-    去掉）。所以调用它的地方必须是**已使能**的电机——使能态的 DM 电机自己会持续
-    发状态帧，等一下就有；未使能的电机不发帧，这里只会一直返回 ``None``。
+    去掉），所以**帧必须来自调用方自己的指令流**：DM 电机只为收到的指令帧回一帧，
+    不会自己持续发帧——使能态也一样（实测真机：停发之后连等 4 个 50 ms 窗口，一帧
+    都没有）。调用方在**同一拍里先等帧、又不发帧**，就会永远等下去；05 的拖动分支
+    踩过这个坑，那里的注释写了正确顺序（先补发一条定下来的保活帧，再等）。未使能的
+    电机同理，只会一直返回 ``None``。
     """
     state = fresh_state(gripper)
     if state is None:
@@ -471,9 +474,25 @@ class IdleKeeper:
         """
         if now - self.last_sent < self.interval:
             return None
+        return self.send_now(now)
+
+    def send_now(self, now):
+        """不等节拍，立刻重发一帧**已经定下来的**保活帧。
+
+        给「要先发帧、再等帧」的调用方用（见主循环拖动分支那段注释）：电机不回帧
+        是因为没人给它发帧，所以那一拍必须真的发出去一条，不能因为还没到 200 Hz 的
+        节拍就空等。重发的仍是 ``self.frame`` 那条定下来的帧——目标不变、零前馈，
+        不命令任何运动；**没有定下来的帧就一帧都不发**（拿缓存伪值现造一条是发阶跃
+        指令，比不发危险得多）。
+
+        Returns:
+            和 :meth:`maybe_send` 一样：True/False = 发出去了/没发出去。
+        """
         if self.frame is None:
             # 还没有一个可信的目标——宁可这一拍不发，也不拿缓存的伪值现造一帧。
-            # 电机是使能态，自己会持续发状态帧，下一拍读到了就开始发锁位帧。
+            # 代价说清楚：电机不会自己发帧，这一拍不发就等于这一拍没有帧流，下一拍
+            # 也读不到（除非别处还在发），所以这条「等第一帧」的路只在使能前后那段
+            # 有帧流的窗口里走得通——``enable()`` 自己会流一小段，帧就来自那里。
             self.frame = hold_frame(self.gripper)
             if self.frame is None:
                 self.starved += 1
@@ -499,7 +518,10 @@ def make_sliders(gripper, *, live, default_force_n, default_speed_pct):
     """
     start_fraction = 1.0
     if live:
-        state = fresh_state(gripper)   # 使能后电机自己会发帧，等一帧就好
+        # 这里还没有 keeper（它在后面才建），帧只能来自 ``enable()`` 刚流的那一小
+        # 段留在缓冲里的应答，所以这一步读不到是有可能的——读不到就退回名义起点，
+        # 并在下面说明，不会因此下发任何东西。
+        state = fresh_state(gripper)
         if state is None:
             print(f"   读不到真机状态帧（等了 {FRESH_WAIT_S * 1000:.0f} ms）："
                   "开度滑条起点只能用 100%，不代表真机现在的开度"
@@ -753,6 +775,7 @@ def main():
     drive = None
     last_sent = 0.0
     last_print = 0.0
+    last_starve_print = 0.0  # 上一次「读不到帧、拒绝下发」的刷屏时间
     last_target_pct = None   # None = 还没读到过滑条，第一帧只对齐基准
     drags = 0                # 拖动次数 = 建过几条驱动
     faulted = False          # 真机报故障：停发、不再对着不听话的电机发帧
@@ -836,49 +859,82 @@ def main():
                     # 的位置」，还没有一条指令。拿旧读数当起点，限速本身就没有意义
                     # 了——一步就是从错的地方走到目标。所以拿不到就拒绝，别猜。
                     start_rad = None
+                    ready = True
                     if live:
                         state = fresh_state(gripper)
+                        if state is None and keeper is not None:
+                            # 读不到就再给一次机会，但顺序必须是**先发帧、再等帧**：
+                            # DM 电机只为收到的指令帧回一帧，不会自己持续发帧（实测
+                            # 真机：停发之后连着等 4 个 50 ms 窗口，一帧都没有）。而
+                            # 每圈开头 read_real() 的那次 get_state(wait=False) 已经把
+                            # 上一帧收走了，所以刚才那 50 ms 等的是一个我们自己没触发
+                            # 的东西，再等多久也等不来。
+                            #
+                            # 补发的是 keeper 里那条**已经定下来**的保活帧（目标不
+                            # 变、零前馈），不是拿旧读数现造的新指令：重发一条定下来
+                            # 的帧，电机的目标不动，最坏只是它没跟上；现造一帧才是把
+                            # 「读数坏了」变成一条指向别处的阶跃。用 send_now 而不是
+                            # maybe_send：这里要的是「现在就发」，不该被 200 Hz 的节拍
+                            # 卡住（这一拍不发，下一拍还是读不到，就成死循环了）。
+                            keeper.send_now(now)
+                            state = fresh_state(gripper)
                         if state is None:
-                            print(f"\n读不到真机的状态帧（等了 "
-                                  f"{FRESH_WAIT_S * 1000:.0f} ms），**不下发**：")
-                            print("   限速要按「现在」的位置算，拿旧读数算出来的"
-                                  "是一条阶跃指令，电机接不住。")
-                            print("   先看真机怎么了："
-                                  "python3 examples/05_dual_control.py --status")
-                            continue
-                        fault = fault_of(state)
-                        if fault:
-                            # 锁死的故障下，发什么都白搭，还会掩盖真正的原因
-                            drive = None
-                            faulted = True
-                            print(f"\n真机报故障：{fault}")
-                            print("   故障是锁死的：位置照读，但电机不执行任何指令。"
-                                  "请先清故障再下发：")
-                            print("   python3 examples/05_dual_control.py --status "
-                                  "--clear-fault")
-                            continue
-                        start_rad = state.position_rad
-                        travel_mm = abs(target_rad - start_rad) \
-                            * gripper.config.rad_to_mm
-                        print(f"\n[拖动 #{drags + 1}] 开度 {target_pct:.1f}% · "
-                              f"从实测 {start_rad:+.4f} rad 起步 · "
-                              f"路程 {travel_mm:.1f} mm · "
-                              f"限速 {speed_pct:.0f}% "
-                              f"（{speed_pct / 100.0 * RATED_SPEED_MM_S:.0f} mm/s）")
+                            # 不下发，但**不能 continue**：循环末尾那一块既在喂保活帧，
+                            # 也在 sim.step() 推进窗口。跳过它，真机就再没人喂（静默
+                            # 0.9 s 就锁 0xD 故障），窗口也再不刷新、退出键也读不到
+                            # ——按住不动的滑条能把整个样例卡死在这一行上。所以这里
+                            # 只拦下「这一次拖动」，让这一圈照常走到底。
+                            ready = False
+                            if now - last_starve_print >= PRINT_DT:
+                                last_starve_print = now
+                                print(f"\n读不到真机的状态帧（等了 "
+                                      f"{FRESH_WAIT_S * 1000:.0f} ms，补发一帧保活帧"
+                                      f"又等了 {FRESH_WAIT_S * 1000:.0f} ms 仍没有），"
+                                      "**不下发**：")
+                                print("   限速要按「现在」的位置算，拿旧读数算出来的"
+                                      "是一条阶跃指令，电机接不住。")
+                                print("   保活帧还在照发，先把滑条放回原处；再看真机"
+                                      "怎么了："
+                                      "python3 examples/05_dual_control.py --status")
+                        else:
+                            fault = fault_of(state)
+                            if fault:
+                                # 锁死的故障下，发什么都白搭，还会掩盖真正的原因
+                                faulted = True
+                                ready = False
+                                print(f"\n真机报故障：{fault}")
+                                print("   故障是锁死的：位置照读，但电机不执行任何"
+                                      "指令。请先清故障再下发：")
+                                print("   python3 examples/05_dual_control.py --status "
+                                      "--clear-fault")
+                            else:
+                                start_rad = state.position_rad
+                                travel_mm = abs(target_rad - start_rad) \
+                                    * gripper.config.rad_to_mm
+                                print(f"\n[拖动 #{drags + 1}] 开度 "
+                                      f"{target_pct:.1f}% · "
+                                      f"从实测 {start_rad:+.4f} rad 起步 · "
+                                      f"路程 {travel_mm:.1f} mm · "
+                                      f"限速 {speed_pct:.0f}% "
+                                      f"（{speed_pct / 100.0 * RATED_SPEED_MM_S:.0f} "
+                                      f"mm/s）")
                     else:
                         # dry-run：没有真机可读，接着上一条驱动停住的位置走。
                         start_rad = dry_rad
                         print(f"\n[拖动 #{drags + 1}] 开度 {target_pct:.1f}% · "
                               f"（dry-run：起点用命令值 {start_rad:+.4f} rad）")
-                    drive = SliderDrive(
-                        start_rad=start_rad, speed_rad_s=plan_speed(gripper, speed_pct),
-                        kp=gripper.config.kp, kd=gripper.config.kd)
-                    drags += 1
-                    last_sent = 0.0
-                drive.retarget(target_rad)
-                # 「速度 %」随时可调：它改的是**位置目标每帧的增量**，不是这一条驱动
-                # 开跑时的速度。
-                drive.speed_rad_s = plan_speed(gripper, speed_pct)
+                    if ready:
+                        drive = SliderDrive(
+                            start_rad=start_rad,
+                            speed_rad_s=plan_speed(gripper, speed_pct),
+                            kp=gripper.config.kp, kd=gripper.config.kd)
+                        drags += 1
+                        last_sent = 0.0
+                if drive is not None:
+                    drive.retarget(target_rad)
+                    # 「速度 %」随时可调：它改的是**位置目标每帧的增量**，不是这一条
+                    # 驱动开跑时的速度。
+                    drive.speed_rad_s = plan_speed(gripper, speed_pct)
 
             if faulted:
                 pass                       # 故障态一帧都不发：发了也不执行

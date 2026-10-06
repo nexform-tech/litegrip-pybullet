@@ -301,6 +301,14 @@ not a keep-alive nicety: an enabled motor that hears nothing for about 0.9 s
 latches a communication-loss fault (0xD), so standing still is the thing that
 fails.
 
+A starved drag does not stop the stream either. That branch only refuses to
+*command* — with no fresh position there is no ramp it can justify — and it
+resends the keep-alive frame it had already established (same target, zero
+feed-forward), then returns to the loop: the motor keeps hearing from the
+example, and the window keeps rendering and reading the exit key. The two 50 ms
+waits pace the loop at about 10 Hz while the read is starved, still far inside
+the 0.9 s watchdog.
+
 ```bash
 python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.json
 python3 examples/05_dual_control.py --dry-run         # window only, never touches CAN
@@ -380,13 +388,16 @@ run while the gripper holds a part or is in someone's hands. Reading the DM
 registers does put read requests on the bus, which is not the same as sending no
 frames: it is the *motion* commands it never sends.
 
-An unpowered, unenabled motor sends no status frames, so `--status` there cannot
-read a position at all. That is reported as "cannot tell" with **exit 0**, not as
-a fault: it skips the position and error-code lines rather than printing the
-SDK's `0.0` initial value as if it were a measurement, and still reads the
-registers. Faults are only determinable from a status frame, so run the example
-without `--status` if you need that judgement — it enables the motor, and an
-enabled motor streams frames by itself.
+A status frame is an *answer*: a DM motor returns one frame per command frame it
+receives and does not stream on its own, enabled or not (measured on this
+hardware: stop sending and four consecutive 50 ms windows pass with no frame at
+all). `--status` sends no command frames, so there is nothing for the motor to
+answer and it cannot read a position at all. That is reported as "cannot tell"
+with **exit 0**, not as a fault: it skips the position and error-code lines
+rather than printing the SDK's `0.0` initial value as if it were a measurement,
+and still reads the registers. Faults are only determinable from a status frame,
+so run the example without `--status` if you need that judgement — it keeps
+sending, and that is what makes the motor answer.
 
 Only `--clear-fault` sends frames, and those are all zero-torque; but the SDK's
 clear sequence is disable → clear → enable, so the motor goes limp for an instant

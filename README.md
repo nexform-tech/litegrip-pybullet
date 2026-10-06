@@ -436,11 +436,13 @@ python3 examples/05_dual_control.py --status                  # read only, no mo
 python3 examples/05_dual_control.py --status --clear-fault    # disable → clear → enable
 ```
 
-`--status` does not open a window and does not enable the motor. On an
-unpowered motor it cannot read a position at all — a disabled motor sends no
-status frames — and that is reported as "cannot tell", exit 0, not as a fault;
-the DM registers are still read. Only `--clear-fault` sends frames, and its
-disable → clear → enable sequence leaves the fingers limp for an instant.
+`--status` does not open a window, does not enable the motor and sends no
+command frame. A DM motor answers commands — one status frame per command frame,
+in any enable state — so with nothing sent there is nothing answered and no
+position can be read at all; that is reported as "cannot tell", exit 0, not as a
+fault, and the DM registers are still read. Only `--clear-fault` sends frames,
+and its disable → clear → enable sequence leaves the fingers limp for an
+instant.
 
 ## Verification status
 
