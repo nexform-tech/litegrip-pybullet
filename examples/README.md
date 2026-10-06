@@ -62,12 +62,29 @@ If `pybullet` is missing, the examples re-exec themselves into `./.venv/bin/pyth
 when that exists. Nothing else is required: the URDF and its meshes are bundled
 under `src/litegrip_pybullet/assets/litegrip_urdf/`, so a fresh clone runs as-is.
 
-Bring up CAN before running 03, 04 or 05:
+Bring up CAN before running 03, 04 or 05. You do not have to do it by hand: before
+connecting, the three of them read the interface with `ip -details link show` and
+run the privileged commands **only when its state is actually wrong** — an interface
+that is already right costs no command and no password prompt. `--no-can-setup`
+turns the step off.
 
 ```bash
-sudo ip link set can0 up type can bitrate 1000000
+ip -details link show can0          # what the probe reads, with -details
+python3 examples/04_mirror_real.py --no-can-setup   # or manage it yourself
+```
+
+What the automatic step runs when it does have to repair, and the manual recipe:
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100 fd off
+sudo ip link set can0 up
 ip -details link show can0
 ```
+
+`restart-ms` is not optional. The kernel default is `restart-ms 0`: the controller
+never leaves bus-off by itself, so one bad frame leaves the interface up, at the
+right bitrate, and unable to send anything.
 
 > **Examples 03, 04 and 05 move real hardware.** Read
 > [Before you drive the hardware](#before-you-drive-the-hardware) first.
@@ -492,6 +509,20 @@ Confirm the CAN interface before anything moves:
 ```bash
 ip -details link show can0
 ```
+
+Read it with `-details`. The flag list alone cannot tell a working interface from a
+bus-off one: both print `UP,LOWER_UP` and the right bitrate. Only `can state` tells
+them apart, and a bus-off controller sends nothing at all — which is what
+`使能失败: [Errno 100] Network is down` usually means. It is a host link problem,
+not a gripper one: a CAN socket binds happily on a down interface, so `connect()`
+succeeds and the failure only shows on the first frame. The examples now probe the
+interface before connecting and repair it only when it is wrong — the recipe is near
+the top of this document. With `restart-ms 0` a bus-off interface stays broken until
+something reconfigures it.
+
+Do not run the examples against an interface another program is using: the repair
+step does not drive off a second master already on the bus, and the SDK does not
+share it.
 
 ### Which calibration is in use
 
