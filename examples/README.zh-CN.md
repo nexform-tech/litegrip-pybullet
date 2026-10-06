@@ -55,12 +55,26 @@ python3 -m pip install -e /path/to/litegrip-python    # 03–05
 别的：URDF 和网格已经打包在 `src/litegrip_pybullet/assets/litegrip_urdf/` 里，克隆下来
 就能跑。
 
-03/04/05 之前先把 CAN 起起来：
+03/04/05 之前先把 CAN 起起来。这一步不用你手动做：三个样例在连接前都会用
+`ip -details link show` 读一次接口，只有状态**真的不对**时才跑那几条需要特权的命令
+——接口本来就对的话，一条命令都不跑，也不问密码。要自己管接口就加 `--no-can-setup`。
 
 ```bash
-sudo ip link set can0 up type can bitrate 1000000
+ip -details link show can0          # 探测读的就是这个，要带 -details
+python3 examples/04_mirror_real.py --no-can-setup   # 或者你自己管
+```
+
+真需要修时自动那一步跑的东西（也是手动配方）：
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100 fd off
+sudo ip link set can0 up
 ip -details link show can0
 ```
+
+`restart-ms` 不能省。内核默认是 `restart-ms 0`：控制器进了 bus-off 不会自己恢复，
+一帧坏帧就能让接口处于「up 着、比特率也对、却什么都发不出去」的状态。
 
 > **样例 03、04、05 会驱动真机。** 先读[「上真机之前」](#上真机之前)。
 
@@ -384,6 +398,13 @@ ip -details -statistics link show can0      # 总线忙不忙：要没人跑时�
 ```bash
 ip -details link show can0
 ```
+
+要带 `-details` 读。只看标志位分不出「好用」和「bus-off」——两者都印 `UP,LOWER_UP`、
+比特率也都对，只有 `can state` 分得开；而 bus-off 的控制器一帧都发不出去，
+`使能失败: [Errno 100] Network is down` 多半说的就是它。那是**主机侧的链路问题，不是
+夹爪**：CAN 的 socket 在 down 的接口上照样 bind 得上，所以 `connect()` 会成功，直到发
+第一帧才暴露。现在样例连接前会探测接口、只在真的不对时才修（配方在本文件开头）；
+`restart-ms 0` 时 bus-off 会一直坏着，直到有东西重新配置接口。
 
 ### 这次用的是哪份标定
 

@@ -60,9 +60,13 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     add_common_args,
     add_hardware_args,
     calibration_summary,
+    can_link_failure,
     check_calibration_matches_args,
     check_sdk_api,
     choose_calibration_file,
+    connect_failure_message,
+    enable_failure_message,
+    ensure_can_link,
     factory_calibration_path,
     import_litegrip,
     load_chosen_calibration,
@@ -152,28 +156,27 @@ def open_gripper(args, litegrip):
         print(note)
     print(f"   [真机] 连接 {args.channel} · can_id={args.can_id:#04x} · "
           f"mst_id={args.mst_id:#04x}")
+    if not args.no_can_setup:
+        # 和 _common.open_real_gripper 一样：连接之前探测接口，只在真的不对时才用
+        # sudo 拉起。这条路径永远是使能的（录制/回放），所以 repair=True。
+        ensure_can_link(args.channel, repair=True)
     gripper = litegrip.LiteGrip(channel=args.channel, can_id=args.can_id,
                                 mst_id=args.mst_id)
     try:
         if not gripper.connect():
-            raise SystemExit(
-                f"连不上 {args.channel}。检查：\n"
-                f"   1) 接口是否存在且已起来 —— "
-                f"sudo ip link set {args.channel} up type can bitrate 1000000\n"
-                f"   2) ip -details link show {args.channel}\n"
-                f"   3) 夹爪是否已上电、CAN_H/CAN_L 是否接对、"
-                f"终端电阻（120Ω）是否装了"
-            )
+            raise SystemExit(connect_failure_message(args.channel))
         # 标定必须在 enable 之前载入：SDK 的毫米刻度依赖它，轨迹的归一化开度也是
         load_chosen_calibration(gripper, calib_path, calib)
         if not gripper.enable():
-            raise SystemExit("使能失败：夹爪可能处于错误状态或未上电")
+            raise SystemExit(enable_failure_message(args.channel))
     except SystemExit:
         gripper.disconnect()
         raise
     except Exception as exc:      # SDK 的各种 *Error
         gripper.disconnect()
-        raise SystemExit(f"初始化真机失败：{exc}") from exc
+        # enable 路上撞到的 [Errno 100] 走到这里：翻成主机的链路问题
+        raise SystemExit(can_link_failure(exc, args.channel)
+                         or f"初始化真机失败：{exc}") from exc
     cfg = gripper.config
     print(f"   [真机] 已使能 · 行程 {cfg.pos_closed_rad - cfg.pos_open_rad:.4f} rad"
           f"（{cfg.pos_closed_rad:+.4f} → {cfg.pos_open_rad:+.4f}）"

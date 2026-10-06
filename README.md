@@ -227,12 +227,27 @@ sim.disconnect()
 
 ### CAN bus setup
 
-Every hardware example needs a 1 Mbit/s SocketCAN interface (default `can0`):
+Every hardware example needs a 1 Mbit/s SocketCAN interface (default `can0`).
+
+You do not have to configure it yourself. Before connecting, examples 03, 04 and 05
+read the interface with `ip -details link show` and run the privileged `ip` commands
+**only when its state is actually wrong**. An interface that is already right runs
+no command at all and asks for no password. `--no-can-setup` turns the whole step
+off, for when you manage the interface yourself.
+
+The manual recipe, which is also what the automatic step runs:
 
 ```bash
-sudo ip link set can0 up type can bitrate 1000000
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100 fd off
+sudo ip link set can0 up
 ip -details link show can0
 ```
+
+Do not leave out `restart-ms`. The kernel default is `restart-ms 0`, which means the
+controller never leaves bus-off on its own: one bad frame leaves the interface up,
+at the right bitrate, and unable to send anything. Some USB adapters reject the
+option; the examples retry that one command without it and leave the rest alone.
 
 ### Real hardware
 
@@ -437,7 +452,10 @@ python3 examples/05_dual_control.py --status --clear-fault    # disable → clea
 ```
 
 `--status` does not open a window, does not enable the motor and sends no
-command frame. A DM motor answers commands — one status frame per command frame,
+command frame. It also **probes** the CAN interface without repairing it: it prints
+what it read and leaves the interface exactly as it found it. Changing the interface
+underneath would delete the evidence `--status` exists to collect. 04's `--passive`
+behaves the same way. A DM motor answers commands — one status frame per command frame,
 in any enable state — so with nothing sent there is nothing answered and no
 position can be read at all; that is reported as "cannot tell", exit 0, not as a
 fault, and the DM registers are still read. Only `--clear-fault` sends frames,
@@ -464,6 +482,7 @@ What has been verified, and what has not:
 | Example 05 `--status` diagnostics | ⚠️ **Partially verified** | On a real gripper on 2026-09-28 it read a live status frame, the position, the error code and the DM registers without enabling or moving the motor (exit 0) — again with the other SDK checkout. The reporting path for a **latched fault**, clearing one, and the new "disabled motor, no position readable, exit 0" behaviour have not been exercised on hardware |
 | Real-hardware motion commands | ⚠️ **Partially verified** | A step-command stream was sent to hardware from an earlier revision of example 05 and faulted the motor; the ramped replacement has not been run yet |
 | Idle keep-alive (`IdleKeeper`, 04's hold frames) | ⚠️ **Partially verified** | Unit-tested for cadence and for the gap staying under the timeout; **never run against hardware** |
+| The CAN probe (`ensure_can_link`, `--no-can-setup`) | ⚠️ **Partly verified** | Reading is verified: the parser is pinned against real `ip -details link show` transcripts (including a bus-off one where every flag looks healthy), and `probe_can_link('can0')` was run read-only on this machine and read the interface correctly. The **repair** — the `sudo ip` sequence that brings a wrong interface up — has only been exercised against a stand-in `run`; nobody has watched it fix a real interface |
 
 The simulation dynamics are PyBullet's, with the URDF's own inertias. The finger
 speed limit and the force cap are enforced by this library; the reported servo
@@ -474,11 +493,26 @@ hardware measurement.
 
 ### CAN does not come up
 
+Read it with `-details`. The flag list alone is not enough, because the two causes
+below look identical without `can state`:
+
 ```bash
-ip link show can0
-sudo ip link set can0 up type can bitrate 1000000
 ip -details link show can0
 ```
+
+- **The interface is not up.** The flags read `<NOARP>` — no `UP`. Examples 03, 04
+  and 05 fix this themselves before connecting; by hand it is the recipe under
+  [CAN bus setup](#can-bus-setup).
+- **The controller is bus-off.** The flags read `<NOARP,UP,LOWER_UP>` and the bitrate
+  is right, so every flag looks healthy — but not one frame can be sent. Only
+  `can state BUS-OFF` says so. With `restart-ms 0` it stays that way until something
+  reconfigures the interface.
+
+`enable()` failing with `[Errno 100] Network is down` is a host link problem, not a
+gripper one. A CAN socket binds happily on an interface that is down, so `connect()`
+succeeds and the failure only surfaces when the first frame is sent — which is why
+it used to be reported as "the gripper may not be powered". The examples now name
+the link instead; check `can state` before touching the wiring.
 
 The examples default to `can0` and CAN ID `0x08`; `--channel` and `--can-id`
 change both. A USB-CAN adapter that disappears mid-run shows up as `ENOBUFS`

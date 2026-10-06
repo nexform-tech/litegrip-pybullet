@@ -203,12 +203,24 @@ sim.disconnect()
 
 ### 配 CAN
 
-每个真机样例都要一条 1 Mbit/s 的 SocketCAN 接口（默认 `can0`）：
+每个真机样例都要一条 1 Mbit/s 的 SocketCAN 接口（默认 `can0`）。
+
+**这一步不用你手动做**：样例 03、04、05 在连接前会用 `ip -details link show` 读一次
+接口，只有状态**真的不对**时才去跑那几条需要特权的 `ip` 命令。接口本来就是对的，就
+一条命令都不跑、也不问密码。要自己管接口，加 `--no-can-setup`。
+
+手动那份配方，也是自动那一步真正跑的东西：
 
 ```bash
-sudo ip link set can0 up type can bitrate 1000000
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100 fd off
+sudo ip link set can0 up
 ip -details link show can0
 ```
+
+`restart-ms` 不能省。内核默认是 `restart-ms 0`，意思是控制器进了 bus-off 之后**不会
+自己恢复**：一帧坏帧就能让接口处于「up 着、比特率也对、却什么都发不出去」的状态。有些
+USB 适配器不认这个选项，样例只会去掉它重试那一条命令，别的一概不动。
 
 ### 上真机
 
@@ -387,8 +399,12 @@ python3 examples/05_dual_control.py --status                  # 只读，不发�
 python3 examples/05_dual_control.py --status --clear-fault    # disable → clear → enable
 ```
 
-`--status` 不开窗口、不使能、也不发任何指令帧。状态帧是**回**出来的——DM 电机收到一条
-指令帧才回一帧，使能与否都一样——一条不发就没有可回的东西，所以它**根本读不到位置**。
+`--status` 不开窗口、不使能、也不发任何指令帧。它还会**读**一次 CAN 接口，但**不修**：
+读到什么就打印什么，接口原样留在那儿——替它把接口改掉，恰好把 `--status` 存在的意义
+抹掉了。04 的 `--passive` 同样如此。
+
+状态帧是**回**出来的——DM 电机收到一条指令帧才回一帧，使能与否都一样——一条不发就
+没有可回的东西，所以它**根本读不到位置**。
 这时它报的是「判不了」、退出码 0，而不是故障；DM 寄存器照读。只有 `--clear-fault`
 会发帧，而它的 disable → clear → enable 中间那一瞬间手指是失力的。
 
@@ -412,6 +428,7 @@ python3 examples/05_dual_control.py --status --clear-fault    # disable → clea
 | 样例 05 的 `--status` 诊断 | ⚠️ **部分验证** | 2026-09-28 在 `can0` 的真实夹爪上，它读到一帧新状态、位置、错误码和 DM 寄存器，全程未使能、未动电机（exit 0）——同样是另一份 SDK 检出。**锁死故障**的报出、清除，以及新的「未使能读不到位置也退出 0」行为，都还没在真机上试过 |
 | 真机运动指令 | ⚠️ **部分验证** | 早期版本的样例 05 向真机发过阶跃指令流，把电机打进了故障态；换成斜坡之后还没跑过 |
 | 空闲保活（`IdleKeeper` / 04 的锁位帧） | ⚠️ **部分验证** | 有单测覆盖发帧节奏与间隔上限；**没上过真机** |
+| CAN 探测（`ensure_can_link` / `--no-can-setup`） | ⚠️ **部分验证** | 「读」这一半验证过：解析器钉的是 `ip -details link show` 的真输出（含一份每个标志位都正常、其实是 bus-off 的样本），并且 `probe_can_link('can0')` 在本机只读地跑过、读得对。「拉起」那一半——那串把不对的接口配好的 `sudo ip` 命令——只对着替身 `run` 跑过，**没人看着它修好过一个真接口** |
 
 仿真动力学来自 PyBullet，惯量用的是 URDF 自带的。手指限速和力上限由本库施加；报告出来
 的伺服稳定时间是仿真里位置伺服的实测特性，不是真机测量值。
@@ -420,11 +437,22 @@ python3 examples/05_dual_control.py --status --clear-fault    # disable → clea
 
 ### CAN 起不来
 
+要带 `-details` 读。只看标志位不够——下面两种成因，不看 `can state` 分不出来：
+
 ```bash
-ip link show can0
-sudo ip link set can0 up type can bitrate 1000000
 ip -details link show can0
 ```
+
+- **接口没起来。** 标志位是 `<NOARP>`，没有 `UP`。样例 03/04/05 连接前会自己修好；
+  手动修就是[「配 CAN」](#配-can)那份配方。
+- **控制器 bus-off。** 标志位是 `<NOARP,UP,LOWER_UP>`、比特率也对，**每个标志位看着
+  都正常**，但一帧都发不出去。只有 `can state BUS-OFF` 看得出来。`restart-ms 0` 时它
+  会一直这样，直到有东西重新配置接口。
+
+`enable()` 报 `[Errno 100] Network is down`，那是**主机侧的链路问题，不是夹爪**。CAN
+的 socket 在 down 的接口上照样 bind 得上，所以 `connect()` 会成功，直到发出第一帧才
+暴露——这就是它以前被报成「夹爪可能未上电」的原因。现在样例会直接点明是链路；动接线
+之前先看 `can state`。
 
 样例默认用 `can0`、CAN ID `0x08`，`--channel` 和 `--can-id` 可以改。USB-CAN 适配器在
 运行中途掉线时，`enable()` 会报 `ENOBUFS`——那是适配器的问题，不是夹爪。
