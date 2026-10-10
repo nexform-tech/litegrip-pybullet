@@ -29,9 +29,9 @@
   3. 一份可用的标定。标定文件由上位机标定后保存得到：
        litegrip-studio / litegrip-console，或 SDK 自带的 tools/gui/litegrip_gui.py
      标定的角度和毫米刻度是一台机器一个值，拿别人的算目标角，轻则夹不住、重则一条
-     指令撞限位。所以优先用 ``--calib`` 指**这台夹爪**自己那份；不给就用 SDK 包里
-     那份出厂标定（台架夹具的实测参数），出厂文件也读不出来才会在终端里列出候选让
-     你选；选不出来（非交互、没有候选）直接退出。
+     指令撞限位。所以要用 ``--calib`` 指**这台夹爪**自己那份；不给就用 SDK 包里
+     那份出厂标定（台架夹具的实测参数）。样例**不会**去扫盘猜一份——出厂文件也读不
+     出来就直接退出，让你显式给 ``--calib``（``--list-calibrations`` 只列出候选）。
      --dry-run 也要选：它虽然不碰 CAN，但走的就是这套参数。
   4. 有可用的显示：三个滑条只在 GUI 连接下建得出来（--status 不用窗口，也不需要）
 
@@ -91,6 +91,7 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     fraction_to_target_rad,
     fresh_state,
     import_litegrip,
+    list_calibrations,
     open_real_gripper,
     rad_to_fraction,
     read_calibration_file,
@@ -128,7 +129,7 @@ def parse_args():
     add_hardware_args(ap)
     ap.add_argument("--dry-run", action="store_true",
                     help="不连真机、不下发任何指令（只开窗口看流程）；"
-                         "标定照样要先选——它决定目标角和毫米刻度")
+                         "标定照样要定下来——它决定目标角和毫米刻度")
     ap.add_argument("--force", type=float, default=10.0,
                     help=f"夹持力前馈 [N]（默认 10，上限 {MAX_GRIP_FORCE_N:g}）")
     ap.add_argument("--speed", type=float, default=100.0,
@@ -601,9 +602,9 @@ def run_status(args):
     过」），寄存器照读、退出码照常按那里的故障判定给。想让电机开口就先使能，也就是
     跑不带 ``--status`` 的本样例。
 
-    标定照样要先选（``--calib``、SDK 出厂标定，或两者都没有时当场从候选里选）：读回
-    来的位置要换成开度，靠的就是标定的角度和 ``rad_to_mm``——用别台机器的刻度换算，
-    打出来的百分比是错的，而这条路径存在的意义就是让这个百分比可信。
+    标定照样要先定下来（``--calib`` 给的优先，否则用 SDK 出厂标定）：读回来的位置
+    要换成开度，靠的就是标定的角度和 ``rad_to_mm``——用别台机器的刻度换算，打出来的
+    百分比是错的，而这条路径存在的意义就是让这个百分比可信。
 
     加 ``--clear-fault`` 才会写：发的也只是 SDK 的故障清除序列——全程
     ``kp=0/kd=0/tau=0`` 的零力矩帧，**不命令任何运动**。但要说清楚：
@@ -720,6 +721,10 @@ def run_status(args):
 
 def main():
     args = parse_args()
+    if args.list_calibrations:
+        # 纯查询，先于 --status / --headless 那两道闸：它不连真机、不开窗口，
+        # 带着别的开关一起用也不该被拦。
+        return list_calibrations()
     if args.clear_fault and not args.status:
         raise SystemExit("--clear-fault 要配合 --status 用（它只清故障，不驱动）：\n"
                          "   python3 examples/05_dual_control.py --status --clear-fault")

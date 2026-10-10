@@ -273,7 +273,7 @@ def _run(monkeypatch, gripper=None, steps=40, drag_to=None, drag_tick=3,
     args = SimpleNamespace(
         channel="can0", can_id=0x08, mst_id=0x18, calib=None,
         urdf=None, headless=False, dry_run=dry_run, status=False,
-        clear_fault=False, speed=speed, force=10.0,
+        clear_fault=False, speed=speed, force=10.0, list_calibrations=False,
     )
 
     monkeypatch.setattr(ex02, "parse_args", lambda: args)
@@ -720,7 +720,7 @@ class TestStatusReportsMeasuredValues:
         args = SimpleNamespace(
             channel="can0", can_id=0x08, mst_id=0x18, calib=None, urdf=None,
             headless=False, dry_run=False, status=True, clear_fault=False,
-            speed=100.0, force=10.0,
+            speed=100.0, force=10.0, list_calibrations=False,
         )
         monkeypatch.setattr(ex02, "parse_args", lambda: args)
         monkeypatch.setattr(ex02, "open_real_gripper",
@@ -869,7 +869,7 @@ class TestItNeverLeavesTheMotorUnfed:
         monkeypatch.setattr(ex02, "parse_args", lambda: SimpleNamespace(
             channel="can0", can_id=0x08, mst_id=0x18, calib=None, urdf=None,
             headless=False, dry_run=False, status=False, clear_fault=False,
-            speed=100.0, force=10.0))
+            speed=100.0, force=10.0, list_calibrations=False))
         monkeypatch.setattr(ex02, "open_real_gripper", lambda a, enable=True: gripper)
         monkeypatch.setattr(ex02, "p", FakeSliders())
         monkeypatch.setattr(ex02, "time", SimpleNamespace(

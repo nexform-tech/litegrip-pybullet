@@ -16,9 +16,10 @@
   3. 一份可用的标定。标定文件由上位机标定后保存得到：
        litegrip-studio / litegrip-console，或 SDK 自带的 tools/gui/litegrip_gui.py
      仿真的百分比和毫米都由标定的角度 / ``rad_to_mm`` 换算而来，拿别台机器的刻度
-     换算，画面就是错的。所以优先用 ``--calib`` 指**这台夹爪**自己那份；不给就用
-     SDK 包里那份出厂标定（台架夹具的实测参数），出厂文件也读不出来才会在终端里
-     列出候选让你选，选不出来（非交互、没有候选）直接退出。
+     换算，画面就是错的。所以要用 ``--calib`` 指**这台夹爪**自己那份；不给就用
+     SDK 包里那份出厂标定（台架夹具的实测参数）。样例**不会**去扫盘猜一份——出厂
+     文件也读不出来就直接退出，让你显式给 ``--calib``（``--list-calibrations``
+     只把本机候选列出来）。
 
 两种用法：
 
@@ -60,6 +61,7 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     add_common_args,
     add_hardware_args,
     fresh_state,
+    list_calibrations,
     open_real_gripper,
     rad_to_fraction,
     status_line,
@@ -135,6 +137,9 @@ def set_zero_gravity(gripper, on, was_on):
 
 def main():
     args = parse_args()
+    if args.list_calibrations:
+        # 纯查询，先于其余任何事：它不连真机、不发帧，也不开窗口。
+        return list_calibrations()
 
     print("样例 04 · 镜像模式（真机 → 仿真）")
     # --passive 是「只看别人的」：**不使能**、一帧都不发。以前这里也是使能了再一帧

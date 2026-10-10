@@ -39,11 +39,9 @@ def run(script: Path, *args: str, env: dict | None = None
     """Run an example the way a user would: as a script, from the repo root.
 
     stdin is closed on purpose.  Without ``--calib`` a hardware example uses the
-    SDK's factory calibration, and only falls back to *asking* when that file
-    cannot be read — but a child that inherits a real terminal would then sit
-    there waiting for an operator to type: a test that hangs instead of failing.
-    Closed stdin is also the honest simulation of "run from a script": no tty, so
-    the examples must refuse rather than prompt.
+    SDK's factory calibration, and stops when that file cannot be read.  Nothing
+    prompts any more, but closed stdin keeps a hang from hiding behind a pass:
+    the honest simulation of "run from a script" is a child with no terminal.
     """
     # no re-exec under test; `env` lets a test point the SDK discovery elsewhere
     merged = {**os.environ, "LITEGRIP_PYBULLET_REEXEC": "1", **(env or {})}
@@ -490,11 +488,12 @@ class TestExample05Status:
 class TestCalibrationResolution:
     """Which calibration the hardware paths use, and in what order.
 
-    ``--calib`` wins; without it the SDK's own factory file is the default; only
-    when even that cannot be read does the example ask, and with no terminal to
-    ask on it stops.  The factory file is a usable default but it is the bench
-    fixture's geometry, so a run that falls back to it has to say so rather than
-    let the operator believe it is their gripper's numbers.
+    ``--calib`` wins; without it the SDK's own factory file is the default.  When
+    even that cannot be read the example stops and says to pass ``--calib``: it
+    does not scan the machine for candidates and it does not ask.  The factory
+    file is a usable default but it is the bench fixture's geometry, so a run
+    that falls back to it has to say so rather than let the operator believe it
+    is their gripper's numbers.
     """
 
     def test_status_without_calib_uses_the_factory_default(self):
@@ -519,11 +518,10 @@ class TestCalibrationResolution:
         assert "使用 SDK 自带的出厂标定" in text, output_of(result)
         assert NOWHERE in text
 
-    def test_an_unreadable_factory_file_refuses_non_interactively(
-            self, tmp_path):
-        """Tier three: no ``--calib``, no factory file, and stdin is closed, so
-        there is nobody to ask.  It must stop instead of proceeding on the SDK's
-        own idea of which numbers to use."""
+    def test_an_unreadable_factory_file_refuses(self, tmp_path):
+        """No ``--calib`` and no factory file: there is nothing left to fall back
+        on that a human chose.  It must stop and name the flag, not scan the
+        machine and not wait for an answer that is not coming."""
         package = tmp_path / "litegrip"
         package.mkdir()
         (package / "__init__.py").write_text("", encoding="utf-8")
@@ -533,6 +531,25 @@ class TestCalibrationResolution:
         text = output_of(result)
         assert "--calib" in text
         assert "出厂标定" in text, "没说默认那份读不出来"
+
+    def test_list_calibrations_prints_paths_and_stops(self, tmp_path):
+        """``--list-calibrations`` is the surviving half of the scan: it names
+        the candidates so they can be fed to ``--calib``, and stops there.  It
+        touches nothing — the run below points at a CAN interface that cannot
+        exist, so a bus call would be visible as a failure."""
+        home = tmp_path / "home"
+        (home / ".litegrip").mkdir(parents=True)
+        candidate = home / ".litegrip" / "litegrip_calibration.json"
+        candidate.write_text(json.dumps({"zero_position_rad": 0.114,
+                                         "max_position_rad": -1.731,
+                                         "rad_to_mm": 65.0}), encoding="utf-8")
+        result = run(EXAMPLE_05, "--dry-run", "--list-calibrations",
+                     "--channel", NOWHERE, env={"HOME": str(home)})
+        assert result.returncode == 0, output_of(result)
+        text = output_of(result)
+        assert str(candidate) in text
+        assert "--calib" in text
+        assert NOWHERE not in text, "只该列路径，不该去碰总线"
 
     def test_a_simulator_calibration_is_refused(self, tmp_path):
         """The studio keeps the simulator's calibration in a separate

@@ -19,7 +19,8 @@ PyBullet——真机的电机按轨迹走，窗口里的仿真跟着显示，所
      或把 litegrip-python 仓库克隆到本仓库的同级目录
   3. 一份可用的标定：录制要求 SDK 处于**已标定**状态（轨迹按行程归一，没有标定
      就算不出开度），回放也要按本机行程把开度换算回角度。不给 --calib 就用 SDK
-     包里那份出厂标定；出厂文件也读不出来才会在终端里列候选让你选
+     包里那份出厂标定；要换成本台夹爪的那份，只有 --calib 一条路
+     （--list-calibrations 只把本机候选列出来，方便你抄路径）
   4. 录制需要手指能被推动，所以录制期间**不要**让别的程序同时驱动这台夹爪
 
 两种用法:
@@ -69,6 +70,7 @@ from _common import (  # noqa: I001  (必须先于 litegrip_pybullet)
     ensure_can_link,
     factory_calibration_path,
     import_litegrip,
+    list_calibrations,
     load_chosen_calibration,
     rad_to_fraction,
     read_calibration_file,
@@ -517,6 +519,9 @@ def play_offline(sim, trajectory, args):
 
 def main():
     args = parse_args()
+    if args.list_calibrations:
+        # 纯查询，先于其余任何事：它不连真机、不发帧，也不读轨迹，更不需要 SDK。
+        return list_calibrations()
 
     print("样例 03 · 轨迹录制与回放")
     if args.play:

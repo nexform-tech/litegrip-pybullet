@@ -193,7 +193,7 @@ def _run(monkeypatch, gripper=None, steps=60, keys_at=None, on_tick=None,
     args = SimpleNamespace(
         channel="can0", can_id=0x08, mst_id=0x18, calib=None,
         urdf=None, headless=False, zero_gravity=zero_gravity, passive=passive,
-        duration=0.0,
+        duration=0.0, list_calibrations=False,
     )
 
     # ``open_real_gripper`` is where the motor would be enabled; the fake records

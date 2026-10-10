@@ -295,9 +295,13 @@ class TestCalibrationConfig:
 class TestChoosingCalibration:
     """Which calibration file this run uses is a *decision*, made every time.
 
-    Three tiers, and the order is the priority: ``--calib``, then the factory
-    file shipped inside the SDK package, then — only if even that cannot be
-    read — the interactive picker.
+    Two tiers, and the order is the priority: ``--calib``, then the factory file
+    shipped inside the SDK package.  There is no third tier: when neither works
+    the run stops and says to pass ``--calib``.  Scanning ``~/.litegrip`` for
+    candidates and asking an operator to pick one was removed on purpose --
+    guessing which JSON belongs to which gripper is not something this example
+    can do -- and the scan code survives only as the ``--list-calibrations``
+    query, which prints paths and returns.
 
     The factory file is a usable default, not this gripper's calibration: it is
     the geometry of the bench fixture.  That is why the tier exists at all (a
@@ -305,66 +309,66 @@ class TestChoosingCalibration:
     what it is.
     """
 
-    def test_an_explicit_path_is_used_without_asking(self, tmp_path, monkeypatch):
+    def test_an_explicit_path_wins_over_the_factory_file(self, tmp_path):
         wanted = _calib_file(tmp_path / "mine.json")
         factory = _calib_file(tmp_path / "factory_calibration.json")
-        _interactive(monkeypatch, False)      # 非交互也不该妨碍显式指定
         chosen = _common.choose_calibration_file(
-            str(wanted), factory=factory,
-            ask=lambda prompt: pytest.fail("不该提问"))
+            str(wanted), factory=factory, out=lambda text: None)
         assert chosen == wanted
 
     def test_the_factory_file_is_the_default_and_says_what_it_is(
             self, tmp_path):
-        """No ``--calib`` on a fresh machine: the run proceeds instead of asking
-        an operator who may not be there.  It must still say the numbers are the
-        bench fixture's."""
+        """No ``--calib`` on a fresh machine: the run proceeds with the SDK's own
+        file instead of hunting for the operator's.  It must still say the
+        numbers are the bench fixture's, and how to point at another one."""
         factory = _calib_file(tmp_path / "factory_calibration.json")
         printed: list[str] = []
         chosen = _common.choose_calibration_file(
-            None, factory=factory, candidates=[],
-            ask=lambda prompt: pytest.fail("有出厂标定还提问"),
-            out=printed.append)
+            None, factory=factory, out=printed.append)
         assert chosen == factory
         listing = "\n".join(printed)
         assert "出厂标定" in listing
         assert "--calib" in listing, "没说这台夹爪自己的标定怎么指"
 
-    def test_an_unreadable_factory_file_falls_back_to_the_picker(
-            self, tmp_path, monkeypatch):
-        """A factory file that cannot be read is not the end of the run -- it
-        means the SDK install is incomplete, and the operator can still point at
-        the right file."""
-        real = _calib_file(tmp_path / "litegrip_calibration.json")
-        _interactive(monkeypatch, True)
-        chosen = _common.choose_calibration_file(
-            None, factory=tmp_path / "gone.json", candidates=[real],
-            ask=lambda prompt: "1", out=lambda text: None)
-        assert chosen == real
+    def test_an_unreadable_factory_file_refuses_and_names_the_flag(self, tmp_path):
+        """The old third tier answered this with a candidate list.  Now it is a
+        stop: an incomplete SDK install is not a reason to drive the gripper
+        with a file nobody chose."""
+        with pytest.raises(SystemExit) as excinfo:
+            _common.choose_calibration_file(
+                None, factory=tmp_path / "gone.json", out=lambda text: None)
+        message = str(excinfo.value)
+        assert "--calib" in message
+        assert "出厂标定" in message, "没说清默认那份为什么没用上"
 
-    def test_a_corrupt_factory_file_also_falls_back(self, tmp_path, monkeypatch):
-        """Parsing failure, not just a missing file: the SDK package could ship
-        a truncated one, and refusing to start over that would be worse than
-        asking."""
+    def test_a_corrupt_factory_file_refuses_the_same_way(self, tmp_path):
+        """Parsing failure, not just a missing file -- the SDK package could
+        ship a truncated one, and it is still not a default."""
         bad = tmp_path / "factory_calibration.json"
         bad.write_text("{ not json", encoding="utf-8")
-        real = _calib_file(tmp_path / "litegrip_calibration.json")
-        _interactive(monkeypatch, True)
-        chosen = _common.choose_calibration_file(
-            None, factory=bad, candidates=[real],
-            ask=lambda prompt: "1", out=lambda text: None)
-        assert chosen == real
+        with pytest.raises(SystemExit) as excinfo:
+            _common.choose_calibration_file(None, factory=bad,
+                                            out=lambda text: None)
+        assert "--calib" in str(excinfo.value)
 
-    def test_the_picker_still_refuses_when_the_factory_file_is_unreadable(
-            self, tmp_path, monkeypatch):
-        """Tier three keeps every refusal it had: a candidate the operator
-        declines is still a stop, not a silent default."""
+    def test_no_sdk_at_all_refuses_and_names_the_flag(self):
+        """``factory=None`` is what a caller that cannot reach the SDK passes.
+        It is the same stop, with the reason spelled out."""
+        with pytest.raises(SystemExit) as excinfo:
+            _common.choose_calibration_file(None, out=lambda text: None)
+        assert "--calib" in str(excinfo.value)
+
+    def test_a_refusal_never_names_a_candidate(self, tmp_path, monkeypatch):
+        """The one thing the removed third tier did -- printing candidates --
+        must be gone from the refusal path.  ``calibration_candidates`` is
+        stubbed to a real file: if anything still scanned, it would show up."""
         real = _calib_file(tmp_path / "litegrip_calibration.json")
-        _interactive(monkeypatch, True)
-        with pytest.raises(SystemExit):
+        monkeypatch.setattr(_common, "calibration_candidates",
+                            lambda *a, **k: [real])
+        with pytest.raises(SystemExit) as excinfo:
             _common.choose_calibration_file(
-                None, factory=tmp_path / "gone.json", candidates=[real],
-                ask=lambda prompt: "q", out=lambda text: None)
+                None, factory=tmp_path / "gone.json", out=lambda text: None)
+        assert str(real) not in str(excinfo.value)
 
     def test_the_candidates_leave_out_the_simulator_and_the_backups(
             self, tmp_path):
@@ -403,89 +407,57 @@ class TestChoosingCalibration:
         message = str(excinfo.value)
         assert "zero_position_rad" in message
 
-    def test_no_candidates_says_where_calibrations_come_from(self, monkeypatch):
-        _interactive(monkeypatch, True)
-        with pytest.raises(SystemExit) as excinfo:
-            _common.choose_calibration_file(None, candidates=[],
-                                            ask=lambda prompt: pytest.fail(
-                                                "没有候选还提问"))
-        message = str(excinfo.value)
-        assert "上位机" in message
-        assert "--calib" in message
+class TestListingCalibrations:
+    """``--list-calibrations`` is a query, not a chooser: it prints and returns.
 
-    def test_a_non_terminal_refuses_instead_of_picking_one(
+    The scan code had to stay for this -- ``--calib`` needs a path, and the host
+    software's "save as" can put that file anywhere, so the tool that finds it is
+    the only way to change calibration without opening a file manager.  What it
+    must *not* do is pick anything, or touch the bus.
+    """
+
+    def _candidates(self, monkeypatch, paths):
+        monkeypatch.setattr(_common, "calibration_candidates",
+                            lambda *a, **k: list(paths))
+
+    def test_it_lists_the_candidates_with_their_values(
             self, tmp_path, monkeypatch):
-        """No tty means an operator is not there to choose -- and the answer is
-        never "use whatever the SDK defaults to"."""
         real = _calib_file(tmp_path / "litegrip_calibration.json")
-        _interactive(monkeypatch, False)
-        with pytest.raises(SystemExit) as excinfo:
-            _common.choose_calibration_file(None, candidates=[real],
-                                            ask=lambda prompt: pytest.fail(
-                                                "非交互还提问"))
-        message = str(excinfo.value)
-        assert "--calib" in message
-        assert str(real) in message, "没把候选列出来，操作员不知道该指哪个"
-
-    def test_the_operator_picks_by_number(self, tmp_path, monkeypatch):
-        first = _calib_file(tmp_path / "a.json")
-        second = _calib_file(tmp_path / "b.json")
-        _interactive(monkeypatch, True)
+        self._candidates(monkeypatch, [real])
         printed: list[str] = []
-        chosen = _common.choose_calibration_file(
-            None, candidates=[first, second], ask=lambda prompt: "2",
-            out=printed.append)
-        assert chosen == second
+        assert _common.list_calibrations(out=printed.append) == 0
         listing = "\n".join(printed)
+        assert f"1) {real}" in listing
         # The values are listed so the operator can recognise the file they just
         # calibrated with -- the SDK records no provenance at all.
         assert "rad_to_mm" in listing
         assert "closed +0.1140" in listing
         assert "mst_id 0x18" in listing, "ID 要按十六进制打，和命令行/日志一个写法"
-        assert f"1) {first}" in listing
+        assert "--calib" in listing, "没把列出来的路径怎么用说清楚"
 
-    def test_the_operator_can_type_a_path_instead(self, tmp_path, monkeypatch):
-        """The host software's "save as" can put a calibration anywhere."""
-        listed = _calib_file(tmp_path / "a.json")
-        elsewhere = _calib_file(tmp_path / "somewhere" / "else.json")
-        _interactive(monkeypatch, True)
-        chosen = _common.choose_calibration_file(
-            None, candidates=[listed], ask=lambda prompt: str(elsewhere),
-            out=lambda text: None)
-        assert chosen == elsewhere
+    def test_no_candidates_is_still_a_successful_query(self, monkeypatch):
+        """Nothing to list is not an error -- and the message still has to say
+        what the run uses instead, or the empty list reads as "no calibration"."""
+        self._candidates(monkeypatch, [])
+        printed: list[str] = []
+        assert _common.list_calibrations(out=printed.append) == 0
+        listing = "\n".join(printed)
+        assert "出厂标定" in listing
+        assert "上位机" in listing, "没说标定文件是哪来的"
 
-    def test_nonsense_input_asks_again_instead_of_guessing(
+    def test_a_candidate_that_cannot_be_read_is_marked_not_omitted(
             self, tmp_path, monkeypatch):
-        real = _calib_file(tmp_path / "a.json")
-        _interactive(monkeypatch, True)
-        answers = iter(["banana", "1"])
-        chosen = _common.choose_calibration_file(
-            None, candidates=[real], ask=lambda prompt: next(answers),
-            out=lambda text: None)
-        assert chosen == real
-
-    @pytest.mark.parametrize("answer", ["", "q", "quit"])
-    def test_declining_refuses_rather_than_defaulting(
-            self, tmp_path, monkeypatch, answer):
-        real = _calib_file(tmp_path / "a.json")
-        _interactive(monkeypatch, True)
-        with pytest.raises(SystemExit) as excinfo:
-            _common.choose_calibration_file(
-                None, candidates=[real], ask=lambda prompt: answer,
-                out=lambda text: None)
-        assert "标定" in str(excinfo.value)
-
-    def test_end_of_input_is_not_a_choice(self, tmp_path, monkeypatch):
-        real = _calib_file(tmp_path / "a.json")
-        _interactive(monkeypatch, True)
-
-        def eof(prompt):
-            raise EOFError
-
-        with pytest.raises(SystemExit) as excinfo:
-            _common.choose_calibration_file(None, candidates=[real], ask=eof,
-                                            out=lambda text: None)
-        assert "--calib" in str(excinfo.value)
+        """A stale or hand-edited file in ``~/.litegrip`` must not turn the
+        listing into a traceback -- it is exactly when the operator is hunting
+        for the right file."""
+        bad = tmp_path / "broken.json"
+        bad.write_text("{ not json", encoding="utf-8")
+        self._candidates(monkeypatch, [bad])
+        printed: list[str] = []
+        assert _common.list_calibrations(out=printed.append) == 0
+        listing = "\n".join(printed)
+        assert f"1) {bad}" in listing, "读不出的候选也得列出来"
+        assert "读不出" in listing
 
 
 class TestCheckCalibrationMatchesArgs:
@@ -1293,8 +1265,9 @@ class TestArgParsers:
         assert args.mst_id == 0x18
         # ``None`` means "not given on the command line".  It is not a path:
         # ``choose_calibration_file`` turns it into the SDK's factory
-        # calibration, and only asks when even that cannot be read.
+        # calibration, and stops when even that cannot be read.
         assert args.calib is None
+        assert args.list_calibrations is False
         assert args.no_can_setup is False
 
     def test_the_can_setup_can_be_turned_off(self):
@@ -1311,6 +1284,8 @@ class TestArgParsers:
         assert "--calib" in help_text
         assert "litegrip-studio" in help_text, "没说标定文件从哪来"
         assert "出厂标定" in help_text, "没说默认用哪份"
+        # 找路径的唯一工具也得在 --help 里，否则只剩「--calib 指一份」这句话。
+        assert "--list-calibrations" in help_text
 
     def test_hardware_args_accept_hex_and_decimal(self):
         parser = argparse.ArgumentParser()
@@ -1346,8 +1321,8 @@ class TestFactoryCalibrationPath:
 
     def test_the_real_sdk_ships_one(self):
         """Whatever SDK the examples would actually load has to carry the file
-        the default points at -- otherwise every run falls through to the
-        picker and the default is a lie."""
+        the default points at -- otherwise every run without ``--calib`` stops,
+        and the default is a lie."""
         try:
             litegrip = _common.import_litegrip()
         except SystemExit as exc:
