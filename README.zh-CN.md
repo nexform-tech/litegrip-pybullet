@@ -38,7 +38,7 @@
 
 ### 仿真
 
-- **模型随包发布**：`litegrip-urdf` 里上游那份 ROS 2 xacro，在加载时归一化成 PyBullet
+- **模型随包发布**：`litegrip-description` 里上游那份 ROS 2 xacro，在加载时归一化成 PyBullet
   能读的形状（改网格路径、去掉没有质量的根连杆），整个打进包里，克隆下来就能用。
 - **一个开度，两边通用**：仿真和真机唯一说得通的量是归一化开度（0 闭合 … 1 张到
   最大）。其余写法——关节行程、钳口间隙、SDK 的标定毫米——都由它推出来，换算集中在
@@ -282,7 +282,7 @@ python3 examples/03_trajectory.py                       # 先录、再放
 ### URDF 查找
 
 `resolve_urdf(path)` 依次试：显式路径 → `$LITEGRIP_URDF_PATH` → `$LITEGRIP_URDF_DIR` →
-随包一份 → 同级的 `litegrip-urdf` 检出。也就是说换模型是改环境变量，不是改代码。找不到
+随包一份 → 同级的 `litegrip-description` 检出。也就是说换模型是改环境变量，不是改代码。找不到
 会抛 `UrdfError`。
 
 ## 五个样例
@@ -500,7 +500,7 @@ unset 它，要么指到 `<仓库>/src`。`$LITEGRIP_TRAJ_SDK_DIR` 已经没有�
 | [litegrip-python](https://github.com/nexform-tech/litegrip-python) | Python SDK |
 | [litegrip-cpp](https://github.com/nexform-tech/litegrip-cpp) | C++ SDK |
 | [litegrip-ros2](https://github.com/nexform-tech/litegrip-ros2) | ROS 2 驱动 |
-| [litegrip-urdf](https://github.com/nexform-tech/litegrip-urdf) | URDF/xacro 描述包 |
+| [litegrip-description](https://github.com/nexform-tech/litegrip-description) | URDF/xacro 描述包 |
 | [litegrip-docs](https://github.com/nexform-tech/litegrip-docs) | 产品文档 |
 
 ## 文档
