@@ -1,6 +1,6 @@
 """Locate and normalise the LiteGrip URDF for PyBullet.
 
-The upstream description lives in the ``litegrip-urdf`` repository and is a ROS 2
+The upstream description lives in the ``litegrip-description`` repository and is a ROS 2
 xacro: it uses ``$(arg …)`` substitutions, ``package://litegrip_urdf/meshes/…``
 mesh URIs, a ``<ros2_control>`` block, and a massless ``base_footprint`` root
 link.  PyBullet can load none of that as-is, so
@@ -20,10 +20,10 @@ Anything it cannot rewrite (``$(find …)``, ``<xacro:if>``, macros …) raises
 Resolution order:
 
 1. the ``urdf_path`` argument (or ``$LITEGRIP_URDF_PATH`` for a file,
-   ``$LITEGRIP_URDF_DIR`` for a ``litegrip-urdf`` checkout);
+   ``$LITEGRIP_URDF_DIR`` for a ``litegrip-description`` checkout);
 2. the copy bundled with this package
-   (``litegrip_pybullet/assets/litegrip_urdf``, synced from ``litegrip-urdf``);
-3. a sibling ``litegrip-urdf`` checkout next to this repository.
+   (``litegrip_pybullet/assets/litegrip_urdf``, synced from ``litegrip-description``);
+3. a sibling ``litegrip-description`` checkout next to this repository.
 """
 
 from __future__ import annotations
@@ -89,16 +89,16 @@ def _repo_root() -> Optional[Path]:
 
 
 def _sibling_dir() -> Optional[Path]:
-    """A ``litegrip-urdf`` checkout next to this repository, if any."""
+    """A ``litegrip-description`` checkout next to this repository, if any."""
     root = _repo_root()
     if root is None:
         return None
-    sibling = root.parent / "litegrip-urdf"
+    sibling = root.parent / "litegrip-description"
     return sibling if (sibling / "urdf").is_dir() else None
 
 
 def _dir_pair(directory: Path) -> Tuple[Path, Path]:
-    """``dir`` → ``(description file, mesh dir)`` for a ``litegrip-urdf`` tree.
+    """``dir`` → ``(description file, mesh dir)`` for a ``litegrip-description`` tree.
 
     Accepts either the repository root (holding ``urdf/`` and ``meshes/``) or
     the ``urdf/`` directory itself.
@@ -107,7 +107,7 @@ def _dir_pair(directory: Path) -> Tuple[Path, Path]:
     urdf_dir = root / "urdf"
     meshes = root / "meshes"
     if not urdf_dir.is_dir():
-        raise UrdfError(f"{directory} 下没有 urdf/ 目录，不是 litegrip-urdf 布局")
+        raise UrdfError(f"{directory} 下没有 urdf/ 目录，不是 litegrip-description 布局")
     for pattern in ("*.urdf.xacro", "*.urdf", "*.xacro"):
         found = sorted(urdf_dir.glob(pattern))
         if found:
@@ -145,8 +145,8 @@ def _source() -> Tuple[Path, Path]:
         "找不到 LiteGrip 的 URDF。按以下任一方式提供：\n"
         f"  1) 仓库自带资产（应当存在于 {default_urdf()}）；\n"
         "  2) 环境变量 LITEGRIP_URDF_PATH=/path/to/litegrip_urdf.urdf.xacro\n"
-        "     或 LITEGRIP_URDF_DIR=/path/to/litegrip-urdf；\n"
-        "  3) 把 litegrip-urdf 仓库克隆到本仓库的同级目录。"
+        "     或 LITEGRIP_URDF_DIR=/path/to/litegrip-description；\n"
+        "  3) 把 litegrip-description 仓库克隆到本仓库的同级目录。"
     )
 
 
@@ -160,7 +160,7 @@ _PACKAGE_MESH_RE = re.compile(r"package://[^/\"]+/meshes/")
 
 
 def normalize_urdf(text: str, mesh_dir: Path, source: str = "<memory>") -> str:
-    """Rewrite a ``litegrip-urdf`` description into plain URDF text.
+    """Rewrite a ``litegrip-description`` description into plain URDF text.
 
     Args:
         text: Contents of the upstream ``.urdf`` / ``.urdf.xacro`` file.

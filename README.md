@@ -40,7 +40,7 @@ gripper at the same time.
 
 ### Simulation
 
-- **Bundled model**: the upstream ROS 2 xacro from `litegrip-urdf`, normalised
+- **Bundled model**: the upstream ROS 2 xacro from `litegrip-description`, normalised
   for PyBullet at load time (mesh paths rewritten, the massless root link
   stripped) and shipped inside the package, so a fresh clone loads it with no
   extra setup.
@@ -314,7 +314,7 @@ therefore convert between radians and the normalised opening directly. See
 ### URDF resolution
 
 `resolve_urdf(path)` tries, in order: an explicit path, `$LITEGRIP_URDF_PATH`,
-`$LITEGRIP_URDF_DIR`, the bundled copy, then a sibling `litegrip-urdf` checkout.
+`$LITEGRIP_URDF_DIR`, the bundled copy, then a sibling `litegrip-description` checkout.
 Pointing the library at a different gripper model is therefore an environment
 variable, not a code change. An unfindable model raises `UrdfError`.
 
@@ -567,7 +567,7 @@ examples use the same checkout now, so a script that still sets it should set
 | [litegrip-python](https://github.com/nexform-tech/litegrip-python) | Python SDK |
 | [litegrip-cpp](https://github.com/nexform-tech/litegrip-cpp) | C++ SDK |
 | [litegrip-ros2](https://github.com/nexform-tech/litegrip-ros2) | ROS 2 driver |
-| [litegrip-urdf](https://github.com/nexform-tech/litegrip-urdf) | URDF/xacro description package |
+| [litegrip-description](https://github.com/nexform-tech/litegrip-description) | URDF/xacro description package |
 | [litegrip-docs](https://github.com/nexform-tech/litegrip-docs) | Product documentation |
 
 ## Documentation

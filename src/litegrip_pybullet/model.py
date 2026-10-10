@@ -6,7 +6,7 @@ the classic source of off-by-a-lot bugs in gripper code:
 * **joint value** — the URDF prismatic finger travel, in metres.  ``0.0`` is
   fully open, :data:`STROKE_M` is fully closed; both fingers carry the *same*
   value because their prismatic axes point in opposite directions (see the
-  ``litegrip-urdf`` README — equal signs move the jaws symmetrically).
+  ``litegrip-description`` README — equal signs move the jaws symmetrically).
 * **aperture** — the physical gap between the two jaw faces, in millimetres,
   derived from the meshes: 87 mm fully open, 1.5 mm at the calibrated closed
   position.
@@ -31,7 +31,7 @@ takes the fraction from the simulated jaws, ``04_mirror_real`` derives it from
 
 from __future__ import annotations
 
-# ── Geometry of the modelled hardware (litegrip-urdf) ────────────────────────
+# ── Geometry of the modelled hardware (litegrip-description) ────────────────────────
 
 #: Per-finger prismatic travel [m], i.e. the URDF joint ``upper`` limit.  This
 #: is the *measured* single-finger travel of the reference unit (85.452 mm of
@@ -44,7 +44,7 @@ N_FINGERS = 2
 #: Inner face of each jaw at ``joint = 0`` [m].  From the finger mesh bounds:
 #: ``gripper_slider_link{1,2}.STL`` spans x = [-0.00095, +0.0235] about a joint
 #: origin at x = ∓0.067, so the faces sit at x = ±0.0435 and the jaw gap is
-#: ``2 × 0.0435 = 87 mm`` — the model opening quoted by the ``litegrip-urdf``
+#: ``2 × 0.0435 = 87 mm`` — the model opening quoted by the ``litegrip-description``
 #: README.  (PyBullet's ``getAABB`` reports ±0.0405 for the same links: it
 #: inflates the bounds by ~3 mm per side, so do not read the gap off an AABB.)
 FINGER_FACE_AT_ZERO_M = 0.0435

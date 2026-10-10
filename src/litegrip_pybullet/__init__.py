@@ -8,7 +8,7 @@ is what the examples do:
 * :mod:`~litegrip_pybullet.model` — the fraction / joint value / aperture / SDK
   millimetre conversions; the single place where units are reconciled.
 * :mod:`~litegrip_pybullet.urdf` — finds the description (bundled copy of
-  ``litegrip-urdf``, or ``$LITEGRIP_URDF_DIR``) and rewrites it for PyBullet.
+  ``litegrip-description``, or ``$LITEGRIP_URDF_DIR``) and rewrites it for PyBullet.
 
 Example::
 
