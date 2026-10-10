@@ -309,7 +309,7 @@ def _run(monkeypatch, gripper=None, steps=200, mode="record", record=0.1,
     args = SimpleNamespace(
         channel="can0", can_id=0x08, mst_id=0x18, calib="/tmp/calib.json",
         urdf=None, headless=not gui, record=record, speed=speed, real=False,
-        play=None,
+        play=None, list_calibrations=False,
     )
     if mode == "play":
         args.play = "/tmp/fixture"

@@ -263,8 +263,8 @@ python3 examples/05_dual_control.py --speed 40        # 速度滑条从 40% 起�
 python3 examples/05_dual_control.py --force 20 --channel can1
 ```
 
-不给 `--calib` 就用 SDK 包里那份出厂标定；出厂文件也读不出来时才列出候选让你选，见
-[「上真机之前」](#上真机之前)。
+不给 `--calib` 就用 SDK 包里那份出厂标定；出厂文件也读不出来时直接停下，让你显式给
+`--calib`，见[「上真机之前」](#上真机之前)。
 
 `--dry-run` 同样要先定下用哪份标定——目标角和毫米刻度都从它来——但它绝不开 CAN。显式
 给的 `--calib` 会在导入 SDK 之前就先验掉，所以路径写错时报的是「文件不存在」，而不是
@@ -420,11 +420,14 @@ python3 examples/05_dual_control.py            # 不给 --calib：用 SDK 自带
 检出走、换哪台机器都指得到。**那份文件里是台架夹具的实测参数，不是你这台夹爪的参数**：
 它记录的行程端点未必和你面前这台对得上。除了先看一眼效果，请加 `--calib`。
 
-只有在出厂文件也读不出来时，才会把 `~/.litegrip` 下的候选连同修改时间和关键值（闭合/
-张开角度、`rad_to_mm`、`kp`、`mst_id`）列出来，你输编号选一个，也可以直接输路径。上位
-机给仿真后端单独存的 `*.sim.json` 和 `*.bak` 备份**不会**出现在候选里，显式指定
-`*.sim.json` 也会被拒——那份刻度是仿真里的。没有终端可问（管道、脚本、CI）或者一份候选
-都没有时，程序直接停下，并说明标定文件从哪来、`--calib` 怎么给。
+没有第三档了。换标定只有一个办法——用 `--calib <路径>` 显式给出文件——样例既不扫盘、
+也不提问。不给 `--calib`、出厂文件也读不出来时，程序直接停下并说明 `--calib` 怎么给：
+SDK 装得不完整，不是拿一份没人选过的参数去驱动电机的理由。
+
+`--list-calibrations` 把 `~/.litegrip` 下的候选连同关键值（闭合/张开角度、`rad_to_mm`、
+`kp`、`mst_id`）打出来并退出 0。它是一次**查询**——不开 CAN、不发帧、不改默认值——存在
+的意义就是让你把路径抄给 `--calib`。上位机给仿真后端单独存的 `*.sim.json` 和 `*.bak`
+备份**不会**出现在列表里，显式指定 `*.sim.json` 也会被拒——那份刻度是仿真里的。
 
 标定文件是用上位机（`litegrip-studio` / `litegrip-console`，或 SDK 自带的
 `tools/gui/litegrip_gui.py`）对着**这台**夹爪标定后保存出来的。之所以要这么严：SDK 的
@@ -438,8 +441,8 @@ SDK 出厂默认值里的张开角度与它自己 `goto()` 的符号约定相矛
 
 [`_common.py`](_common.py) 被五个样例一起 import，它自己不是样例。里面放着参数解析、SDK
 查找（`import_litegrip()`、`sdk_dir()`、`check_sdk_api()`）、标定解析
-（`choose_calibration_file()`、`factory_calibration_path()`、候选列表、「这份文件到底
-生效了没有」的核实）、连接/使能流程（`open_real_gripper()`）、`fresh_state()`、单位换算
+（`choose_calibration_file()`、`factory_calibration_path()`、`list_calibrations()`、
+「这份文件到底生效了没有」的核实）、连接/使能流程（`open_real_gripper()`）、`fresh_state()`、单位换算
 和状态行。所以每个样例都是先 `from _common import ...` 再 import `litegrip_pybullet`。
 
 读真机位置只该走 `fresh_state(gripper, timeout_s=...)`：`poll()` 只在这次调用里解出一帧

@@ -72,7 +72,8 @@
 - **显式覆盖**：`--calib <路径>` 用这台夹爪自己那份。
 - **先核实再用**：文件会被自己读一遍、逐字段确认确实生效——SDK 自带的加载器在路径读不
   出来时会**静默**改用打包的出厂值。
-- **兜底选择器**：出厂文件也读不出来时，才在终端里列出候选让你选。
+- **不扫盘**：不给 `--calib`、出厂文件也读不出来时就直接停下，让你显式给 `--calib`。
+  样例不去猜机器上哪份 JSON 是这台夹爪的；需要找路径时用 `--list-calibrations` 列候选。
 - **SDK 接口自检**：每个真机样例启动时先核对 SDK 有没有它要调的成员，缺了就直接停下并
   列出缺哪些，而不是在控制循环里才炸。
 
@@ -345,13 +346,16 @@ python3 examples/05_dual_control.py --calib ~/.litegrip/litegrip_calibration.jso
 **静默**改用打包的出厂值，而且照样返回 `True`——路径打错一个字母，就会拿另一台机器的
 角度去驱动电机。
 
-### 兜底的选择器
+### 没有选择器了
 
-`--calib` 和可读的出厂文件都没有时，样例会把 `~/.litegrip` 下的候选连同修改时间和关键值
-（闭合/张开角度、`rad_to_mm`、`kp`、`mst_id`）列出来，让你输编号选一个。上位机给仿真
-后端单独存的 `*.sim.json` 和 `*.bak` 备份**不会**出现在候选里，显式指定 `*.sim.json`
-也会被拒——那份刻度是仿真里的。没有终端可问（管道、脚本、CI）时，程序直接停下并说明
-标定文件从哪来。
+换标定只有一个办法：显式给出文件名 `--calib <路径>`。样例不扫盘、不提问。`--calib` 和
+可读的出厂文件都没有时，程序直接停下并告诉你传 `--calib`——SDK 装得不完整，不是拿一份
+没人选过的参数去驱动电机的理由。
+
+`--list-calibrations` 把 `~/.litegrip` 下的候选连同关键值（闭合/张开角度、`rad_to_mm`、
+`kp`、`mst_id`）打出来，然后退出 0。它是一次**查询**：不连真机、不发帧、也不改变默认
+标定。上位机给仿真后端单独存的 `*.sim.json` 和 `*.bak` 备份**不会**出现在列表里，显式
+指定 `*.sim.json` 也会被拒——那份刻度是仿真里的。
 
 ## 安全机制
 
@@ -420,7 +424,7 @@ python3 examples/05_dual_control.py --status --clear-fault    # disable → clea
 | 力上限与摩擦夹持 | ✅ 已验证 | `tests/test_sim.py`：10 N 夹持力下扛得住 5 N，15 N 会滑；且只有手指碰到工件 |
 | 样例 01–02（纯仿真） | ✅ 已验证 | 两个都无窗口跑通、exit 0，输出内容都在 `tests/test_examples_cli.py` 里断言；01 还会被解析一遍，确认它没有任何运动调用 |
 | 样例 03 的 `--play`（离线回放） | ✅ 已验证 | 读一段 `.lgt` 推进窗口、一帧都不发：无窗口跑通、exit 0，端到端断言在 `tests/test_example03_loop.py`，另一条用真实文件跑的在 `tests/test_examples_cli.py` |
-| 单份 SDK、默认出厂标定 | ✅ 已验证（不碰真机） | `tests/test_common.py` 覆盖查找顺序（`$LITEGRIP_SDK_DIR` → 同级 → 已安装）、`LITEGRIP_SDK_DIR` 指错目录时会明确报错、`factory_calibration_path()` 从包目录解析，以及标定的三档选择；`tests/test_examples_cli.py` 端到端覆盖这些路径 |
+| 单份 SDK、默认出厂标定 | ✅ 已验证（不碰真机） | `tests/test_common.py` 覆盖查找顺序（`$LITEGRIP_SDK_DIR` → 同级 → 已安装）、`LITEGRIP_SDK_DIR` 指错目录时会明确报错、`factory_calibration_path()` 从包目录解析，以及标定的两档选择；`tests/test_examples_cli.py` 端到端覆盖这些路径 |
 | 样例 03 的录制与真机回放 | ⚠️ **未验证** | 两条都没在真机上跑过：它们都会让真机真的动。采样率、位姿换算、保持帧和「录制结束要确认才回放」的闸门由 `tests/test_example03_loop.py` 用桩 SDK 覆盖 |
 | 样例 03 回放前的「点一下窗口」 | ⚠️ **部分验证** | 键盘那一路有单测；鼠标那一路只在真窗口里确认过 `getMouseEvents()` 调得通（0 个事件），**没人真的点过**——`clicked()` 判断的 5 元组布局抄自 pybullet 自带的 `pybullet_examples/createVisualShapeArray.py` |
 | 样例 04（真机 → 仿真） | ⚠️ **部分验证** | 只读镜像路径在 `can0` 的真实夹爪上跑过，但用的是**另一份** SDK 检出——本仓库现在不再用的那份。`--zero-gravity` 和 `--passive` 完全没跑过，这些路径也没有对着 `litegrip-python` 重跑过 |

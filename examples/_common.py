@@ -9,12 +9,15 @@
                      仓库 / 已安装的 litegrip）
   check_sdk_api()    核对 SDK 有没有本仓库依赖的公开接口，缺了就在启动时停下
   add_common_args()  --urdf / --headless
-  add_hardware_args() --channel / --can-id / --mst-id / --calib / --no-can-setup
+  add_hardware_args() --channel / --can-id / --mst-id / --calib / --list-calibrations
+                     / --no-can-setup
   ensure_can_link()  连接之前探测 CAN 接口；状态不对才用 sudo 把它拉起来
                      （照上位机 litegrip-studio 的流程；--no-can-setup 可关掉）
   factory_calibration_path()  SDK 包里那份出厂标定文件的路径（跟着包走）
   choose_calibration_file() 定下这次用**哪一份**标定：--calib 指定 → SDK 出厂
-                     标定 → 两个都没有才当场从候选里选
+                     标定；出厂标定也读不出来就报错，让你显式给 --calib
+  list_calibrations()  --list-calibrations：列出本机候选标定文件后退出
+                     （纯查询，帮你找到路径好喂给 --calib）
   calibration_config()  把标定文件装成 ``gripper.config`` 的形状（--dry-run 用）
   open_real_gripper() 连接 → 载入并核实标定 → 使能，失败时给出可读的提示
   fresh_state()      等到一帧**新**的状态帧再读位置；等不到返回 None
@@ -30,9 +33,11 @@
   3) 先用 --dry-run（05）跑一遍看看流程。
 
 不指定 ``--calib`` 时用的是 SDK 包里那份**出厂标定**——它是台架夹具的实测参数，
-而标定的角度/毫米刻度本该是每台夹爪单独量的。拿不准就用 ``--calib`` 指这台夹爪
-自己的那份：上位机 ``litegrip-studio`` / ``litegrip-console`` 标定后保存，或
-SDK 自带的 ``tools/gui/litegrip_gui.py``。
+而标定的角度/毫米刻度本该是每台夹爪单独量的。要换成本台夹爪自己的那份，只有一条
+路：``--calib`` 指过去（上位机 ``litegrip-studio`` / ``litegrip-console`` 标定后
+保存，或 SDK 自带的 ``tools/gui/litegrip_gui.py``）。样例**不会**去扫 ``~/.litegrip``
+猜一份——猜错了就是把别的机器的尺寸驱动到真机上；``--list-calibrations`` 只把这些
+候选列出来给你看，好把路径抄进 ``--calib``。
 
 真机跑之前确认 CAN 已配置好。这一步**不用你手动做**：三个真机样例在连接前会探测
 接口，只在它真的不对时（没 up / 比特率不对 / 控制器 BUS-OFF）才用 sudo 配一次，
@@ -54,7 +59,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -97,6 +101,7 @@ __all__ = [
     "fraction_to_target_rad",
     "fresh_state",
     "import_litegrip",
+    "list_calibrations",
     "load_chosen_calibration",
     "manual_can_hint",
     "missing_sdk_api",
@@ -374,9 +379,15 @@ def add_hardware_args(parser: argparse.ArgumentParser) -> None:
         "--calib", default=None,
         help="标定文件路径。不给就用 SDK 包里那份**出厂标定**（台架夹具的实测"
              "参数，跟着 SDK 包走，换电脑也指得到）；要按这**台**夹爪自己的尺寸"
-             "驱动，就得给出它的标定。出厂文件也读不出来时才在终端里列候选让你"
-             "选。标定文件由 litegrip-studio / litegrip-console 对着真机标定后"
+             "驱动，就把它的标定文件指过来——这是换标定**唯一**的办法，样例不会"
+             "去扫盘替你猜一份。出厂文件也读不出来时直接报错，不会退回候选列表。"
+             "标定文件由 litegrip-studio / litegrip-console 对着真机标定后"
              "保存得到",
+    )
+    parser.add_argument(
+        "--list-calibrations", action="store_true",
+        help="列出本机候选标定文件后退出（纯查询，不连真机、不发帧；把列出的"
+             "路径喂给 --calib 即可换成那份）",
     )
     parser.add_argument(
         "--no-can-setup", action="store_true",
@@ -572,16 +583,18 @@ def read_calibration_file(path) -> dict:
     return data
 
 
-def choose_calibration_file(requested=None, *, factory=None, candidates=None,
-                            ask=input, out=print) -> Path:
-    """定下这次用哪份标定文件。三档，**顺序就是优先级**。
+def choose_calibration_file(requested=None, *, factory=None, out=print) -> Path:
+    """定下这次用哪份标定文件。两档，**顺序就是优先级**。
 
-    * ``--calib <路径>``（``requested``）：直接用，不提问；只做校验。
+    * ``--calib <路径>``（``requested``）：直接用，只做校验。
     * ``factory`` 给了且读得出来：用 SDK 包里那份出厂标定，**不提问**，只打一行
       说明。这是默认路径——``factory`` 由调用方用
       :func:`factory_calibration_path` 算出来，所以它跟着包走，换电脑也一样。
-    * 出厂标定也读不出来（SDK 装得残缺、文件被删）：才回到选择器——列出候选让
-      操作员当场选；非交互（stdin 不是 tty、EOF）或没有候选就直接退出。
+
+    两档都没成（``--calib`` 没给，出厂标定也读不出来）就**直接退出**，让人显式
+    给出 ``--calib``。这里**不扫盘、不提问**：样例不去猜 ``~/.litegrip`` 下哪份
+    JSON 是这台夹爪的，猜错了就是把另一台机器的尺寸驱动到真机上。想在这些文件里
+    挑一份，用 ``--list-calibrations`` 看列表，再把路径喂给 ``--calib``。
 
     出厂标定是**台架夹具的实测参数**，不是每台夹爪各自量的：它是一份能用的默认
     值，不是「这台夹爪的标定」。要按这台夹爪自己的尺寸驱动，用 ``--calib`` 指
@@ -590,13 +603,14 @@ def choose_calibration_file(requested=None, *, factory=None, candidates=None,
 
     Args:
         requested: ``--calib`` 的值（``None`` = 没给）。
-        factory: 出厂标定文件的路径；``None`` 表示调用方拿不到 SDK，直接进选择器。
-        candidates: 候选文件；默认 :func:`calibration_candidates`。
-        ask: 取输入的函数（默认 ``input``）——测试注入用。
+        factory: 出厂标定文件的路径；``None`` 表示调用方拿不到 SDK。
         out: 打印函数（默认 ``print``）——测试注入用。
 
     Returns:
         选中的标定文件路径（已校验存在、可解析、字段齐、不是仿真那份）。
+
+    Raises:
+        SystemExit: 两档都没有可用文件；信息里给出 ``--calib`` 的用法。
     """
     if requested:
         path = Path(requested).expanduser()
@@ -607,82 +621,62 @@ def choose_calibration_file(requested=None, *, factory=None, candidates=None,
         path = Path(factory).expanduser()
         try:
             read_calibration_file(path)
-        except SystemExit:
-            pass          # 出厂文件不在/读不出来：落到下面的选择器，别把它当终局
-        else:
-            out(f"未指定 --calib：使用 SDK 自带的出厂标定 {path}")
-            out("   （台架夹具的实测参数，不是这台夹爪自己量的。"
-                "换 --calib <路径> 指这台夹爪的那份。）")
-            return path
+        except SystemExit as exc:
+            # 出厂文件不在 / 坏了：这里**不**退回候选列表，直接说清楚怎么办。
+            reason = str(exc).splitlines()[0] if str(exc) else ""
+            raise SystemExit(
+                f"没有指定标定文件，SDK 自带的出厂标定也读不出来：{path}\n"
+                f"   （{reason}）\n"
+                "   样例不会去扫盘替你挑一份。请显式指定这台夹爪的标定：\n"
+                "     --calib <路径>\n"
+                "   标定文件由上位机标定后保存：litegrip-studio / "
+                "litegrip-console，\n"
+                "   或 SDK 自带的 tools/gui/litegrip_gui.py。\n"
+                "   要看看本机有哪些候选：--list-calibrations"
+            ) from None
+        out(f"未指定 --calib：使用 SDK 自带的出厂标定 {path}")
+        out("   （台架夹具的实测参数，不是这台夹爪自己量的。"
+            "换 --calib <路径> 指这台夹爪的那份。）")
+        return path
 
-    found = list(calibration_candidates() if candidates is None else candidates)
-    listing = "".join(f"     {i}) {p}\n" for i, p in enumerate(found, 1))
+    raise SystemExit(
+        "没有指定标定文件，这次也拿不到 SDK 自带的出厂标定"
+        "（没装 SDK，或调用方没给出它的路径）。\n"
+        "   样例不会去扫盘替你挑一份。请显式指定：--calib <路径>\n"
+        "   标定文件由上位机标定后保存：litegrip-studio / litegrip-console，\n"
+        "   或 SDK 自带的 tools/gui/litegrip_gui.py。\n"
+        "   要看看本机有哪些候选：--list-calibrations"
+    )
+
+def list_calibrations(out=print) -> int:
+    """``--list-calibrations``：列出本机候选标定文件，返回退出码。
+
+    **纯查询**：不连真机、不发帧，也不改变默认标定——默认永远是 SDK 包里那份出厂
+    标定。它只有一个用途：把路径找出来，喂给 ``--calib``。
+
+    候选来自 :func:`calibration_candidates`（``~/.litegrip`` 和
+    ``$LITEGRIP_CALIB`` 所在目录，按修改时间从新到旧，排除仿真那份 ``*.sim.json``
+    和 ``*.bak``）。**SDK 自带的出厂标定不在列表里**：它就是不给 ``--calib`` 时的
+    默认值，不需要再指一次。
+    """
+    found = calibration_candidates()
     if not found:
-        raise SystemExit(
-            f"没有指定标定文件，SDK 自带的出厂标定也读不出来，"
-            f"候选里也没有（{CALIBRATIONS_DIR} 下没有 *.json）。\n"
-            "   请先用上位机对着真机标定并保存：\n"
-            "     litegrip-studio / litegrip-console（或 SDK 自带 "
-            "tools/gui/litegrip_gui.py）\n"
-            "   然后重跑；也可以直接指路径：--calib /path/to/"
-            "litegrip_calibration.json"
-        )
-    if not sys.stdin.isatty():
-        raise SystemExit(
-            "需要先选定标定文件，但当前不是交互终端（stdin 不是 tty），"
-            "没法让你选。\n"
-            "   SDK 自带的出厂标定也读不出来，所以没得默认。\n"
-            "   脚本/非交互请显式指定：--calib <路径>\n"
-            "   找到的候选：\n"
-            + listing
-            + "   标定文件在上位机里标定后保存得到（litegrip-studio / "
-              "litegrip-console）。"
-        )
-
-    out("SDK 自带的出厂标定读不出来，请选定**这台夹爪**的标定文件"
-        "（标定文件在上位机里标定后保存：\n"
-        "litegrip-studio / litegrip-console，或 SDK 自带的 "
-        "tools/gui/litegrip_gui.py）。")
-    out("  找到这些候选：")
-    for i, path in enumerate(found, 1):
-        try:
-            stamp = time.strftime("%Y-%m-%d %H:%M",
-                                  time.localtime(path.stat().st_mtime))
-        except OSError:
-            stamp = "?"
+        out(f"没有找到候选标定文件（{CALIBRATIONS_DIR} 下没有可用 *.json）。")
+        out("   标定文件由上位机标定后保存：litegrip-studio / litegrip-console，")
+        out("   或 SDK 自带的 tools/gui/litegrip_gui.py。")
+        out("   不给 --calib 时用的是 SDK 包里那份出厂标定，不必在这里选。")
+        return 0
+    out(f"候选标定文件（{len(found)} 个；SDK 自带的出厂标定不在其中——它就是"
+        "不给 --calib 时的默认值）:")
+    for index, path in enumerate(found, start=1):
+        out(f"  {index}) {path}")
         try:
             summary = calibration_summary(read_calibration_file(path))
         except SystemExit:
             summary = "读不出（不是可用的标定文件）"
-        out(f"    {i}) {path}   {stamp}")
-        out(f"       {summary}")
-
-    while True:
-        try:
-            answer = ask(f"  选哪个 [1-{len(found)}]（也可直接输入路径；"
-                         "回车/q 退出）: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            raise SystemExit(
-                "没选标定文件就退出了——不会替你挑一份。\n"
-                "   下次直接指路径：--calib <路径>"
-            )
-        if not answer or answer.lower() in ("q", "quit", "exit"):
-            raise SystemExit(
-                "没有选定标定文件——不会替你挑一份。\n"
-                "   下一步：在上位机里对这台夹爪标定并保存，再重跑；"
-                "或 --calib <路径>。"
-            )
-        if answer.isdigit() and 1 <= int(answer) <= len(found):
-            path = found[int(answer) - 1]
-            read_calibration_file(path)
-            return path
-        # 不是编号就当路径试试——上位机「另存为」可能把标定存到别处了
-        candidate = Path(answer).expanduser()
-        if candidate.is_file():
-            read_calibration_file(candidate)
-            return candidate
-        out(f"   看不懂 {answer!r}：既不是 1-{len(found)} 的编号，"
-            "也不是一个存在的文件路径。再试一次。")
+        out(f"     {summary}")
+    out("   要用其中一份：--calib <上面的路径>")
+    return 0
 
 
 def check_calibration_matches_args(data: dict, *, channel=None, can_id=None,
@@ -1137,9 +1131,10 @@ def open_real_gripper(args: argparse.Namespace, enable: bool = True):
     """连接真机夹爪：选标定 → 探测 CAN 口 → connect → 载入并核实标定 → enable。
 
     标定在**连接之前**就定下来（:func:`choose_calibration_file`）：``--calib``
-    给的优先，没给就用 SDK 包里那份出厂标定，出厂文件也读不出来才在终端里选。
-    ``load_chosen_calibration`` 之后还会逐个字段核实「生效的确实是这一份」——
-    SDK 在文件读不出来时会**静默**改用出厂标定并照样返回 True，光看返回值不够。
+    给的优先，没给就用 SDK 包里那份出厂标定；出厂文件也读不出来就直接退出，让人
+    显式给 ``--calib``——**不扫盘、不提问**。``load_chosen_calibration`` 之后还会
+    逐个字段核实「生效的确实是这一份」——SDK 在文件读不出来时会**静默**改用出厂
+    标定并照样返回 True，光看返回值不够。
 
     任一步失败都打印可读的原因并 ``SystemExit(1)``，不会抛裸异常。
 

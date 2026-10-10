@@ -334,7 +334,7 @@ python3 examples/05_dual_control.py --force 20 --channel can1
 ```
 
 With no `--calib` the example uses the factory calibration inside the SDK
-package; if that file cannot be read either, it lists the candidates and asks
+package; if that file cannot be read either, it stops and says to pass `--calib`
 (see [Before you drive the hardware](#before-you-drive-the-hardware)).
 
 `--dry-run` resolves a calibration the same way — the target angles and the
@@ -542,14 +542,18 @@ the factory's bench-fixture measurements, not measurements of your gripper**: it
 travel endpoints may not match the unit in front of you. Pass `--calib` for
 anything beyond a first look.
 
-Only when no factory file can be read either do the candidates in `~/.litegrip`
-get listed, with their mtime and key values (closed/open angles, `rad_to_mm`,
-`kp`, `mst_id`), and you pick one by number or type a path. The `*.sim.json` file
-the studio writes for its simulator backend and the `*.bak` backups are never
-offered, and a `*.sim.json` named explicitly is refused — its scale belongs to
-the simulated gripper. With no terminal to ask on (a pipe, a script, CI) or
-nothing to offer, the run stops and says how to get a calibration and how to pass
-one.
+There is no third tier. Changing calibration means naming a file — `--calib
+<path>` is the only way — and the examples neither scan the machine nor ask. With
+no `--calib` and no readable factory file the run stops and says how to pass one:
+an incomplete SDK install is not a reason to drive the motor with numbers nobody
+chose.
+
+`--list-calibrations` prints the candidates in `~/.litegrip` with their key
+values (closed/open angles, `rad_to_mm`, `kp`, `mst_id`) and exits 0. It is a
+query — no CAN, no frames, no change of default — that exists so you can copy a
+path into `--calib`. The `*.sim.json` file the studio writes for its simulator
+backend and the `*.bak` backups are never listed, and a `*.sim.json` named
+explicitly is refused — its scale belongs to the simulated gripper.
 
 The file comes from calibrating *this* gripper in the host software
 (`litegrip-studio` / `litegrip-console`, or the SDK's own
@@ -568,8 +572,8 @@ an explanation rather than driven with meaningless angles.
 [`_common.py`](_common.py) is imported by all five examples and is not an example
 itself. It holds the argument parsers, the SDK discovery (`import_litegrip()`,
 `sdk_dir()`, `check_sdk_api()`), the calibration resolution
-(`choose_calibration_file()`, `factory_calibration_path()`, the candidate
-listing, the "did the file actually take effect" check), the connect/enable
+(`choose_calibration_file()`, `factory_calibration_path()`, `list_calibrations()`,
+the "did the file actually take effect" check), the connect/enable
 sequence (`open_real_gripper()`), `fresh_state()`, the unit conversions and the
 status line. Each example therefore starts with `from _common import ...`
 *before* importing `litegrip_pybullet`.

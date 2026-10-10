@@ -88,8 +88,10 @@ gripper at the same time.
 - **Verified before use**: the file is read and checked field by field, because
   the SDK's own loader falls back to the shipped factory values *silently* when
   the path it was given cannot be read.
-- **Picker fallback**: if no factory file can be read either, the examples list
-  the candidates on the terminal and ask.
+- **No scanning**: with no `--calib` and no readable factory file the example
+  stops and says to pass `--calib`. It never guesses which JSON on the machine
+  belongs to this gripper. `--list-calibrations` prints the candidates when you
+  need a path to pass.
 - **SDK API check**: each hardware example verifies at startup that the SDK
   carries the members it calls and stops with the list of what is missing,
   rather than failing inside a control loop.
@@ -384,15 +386,19 @@ unreadable path it loads the shipped factory values *silently* and still returns
 `True`, so a mistyped path would otherwise drive the motor with another
 machine's angles.
 
-### The candidate picker
+### There is no picker
 
-If neither `--calib` nor a readable factory file is available, the examples list
-the candidates in `~/.litegrip` with their modification time and key values
-(closed/open angles, `rad_to_mm`, `kp`, `mst_id`) and ask which one to use. The
+Changing calibration means naming a file: `--calib <path>`. The examples do not
+scan the machine and do not ask. If neither `--calib` nor a readable factory file
+is available, the run stops and says to pass `--calib` — an incomplete SDK
+install is not a reason to drive the motor with numbers nobody chose.
+
+`--list-calibrations` prints the candidates in `~/.litegrip` with their key
+values (closed/open angles, `rad_to_mm`, `kp`, `mst_id`) and exits 0. It is a
+query: it connects to nothing, sends nothing, and changes no default. The
 `*.sim.json` file the studio writes for its simulator backend and the `*.bak`
-backups are never offered, and a `*.sim.json` named explicitly is refused — that
-scale belongs to the simulated gripper. With no terminal to ask on (a pipe, a
-script, CI) the run stops and explains how to get a calibration.
+backups are never listed, and a `*.sim.json` named explicitly is refused — that
+scale belongs to the simulated gripper.
 
 ## Safety
 
