@@ -521,7 +521,7 @@ python3 -m pytest -q
 
 ## 仓库规范
 
-本仓库遵循 NEXFORM ROBOTICS 的共享仓库规范：代理操作规则见 [AGENTS.md](AGENTS.md)，
+本仓库遵循 NEXFORM ROBOTICS 的共享仓库规范：代理操作规则见 [`.nexform-standards.json`](.nexform-standards.json)，
 提交信息用 Conventional Commits，合并到 `main` 后由 semantic-release 自动发版。
 
 ## 许可
