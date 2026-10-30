@@ -40,10 +40,13 @@ gripper at the same time.
 
 ### Simulation
 
-- **Bundled model**: the upstream ROS 2 xacro from `litegrip-description`, normalised
-  for PyBullet at load time (mesh paths rewritten, the massless root link
-  stripped) and shipped inside the package, so a fresh clone loads it with no
-  extra setup.
+- **Bundled model**: a frozen snapshot of the ROS 2 xacro from
+  `litegrip-description`, normalised for PyBullet at load time (mesh paths
+  rewritten, the massless root link stripped) and shipped inside the package, so
+  a fresh clone loads it with no extra setup. The snapshot keeps the older
+  two-independent-finger form because PyBullet's URDF importer ignores
+  `<mimic>`. The current upstream model drives both fingers from one master
+  joint; see [Related repositories](#related-repositories).
 - **One shared opening**: the only quantity the simulation and the hardware
   agree on is the normalised opening (0 closed … 1 wide open). Every other
   notation — joint travel, jaw gap, the SDK's calibrated millimetres — is
