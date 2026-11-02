@@ -38,7 +38,8 @@
 
 ### 仿真
 
-- **模型随包发布**：`litegrip-description` 里上游那份 ROS 2 xacro，在加载时归一化成 PyBullet
+- **模型随包发布**：随包提供的是更早的两指独立模型快照 —— PyBullet 的 URDF 导入器忽略
+  `<mimic>`，当前上游那份单总控关节 xacro 无法在这里联动。加载时归一化成 PyBullet
   能读的形状（改网格路径、去掉没有质量的根连杆），整个打进包里，克隆下来就能用。
 - **一个开度，两边通用**：仿真和真机唯一说得通的量是归一化开度（0 闭合 … 1 张到
   最大）。其余写法——关节行程、钳口间隙、SDK 的标定毫米——都由它推出来，换算集中在
@@ -418,7 +419,7 @@ python3 examples/05_dual_control.py --status --clear-fault    # disable → clea
 
 | 能力 | 状态 | 依据 |
 | --- | --- | --- |
-| URDF/xacro 归一化 | ✅ 已验证 | `tests/test_urdf.py`：上游 ROS 2 xacro 能在 PyBullet 里加载，2 个移动副关节，网格齐全 |
+| URDF/xacro 归一化 | ✅ 已验证 | `tests/test_urdf.py`：随包的两指快照能在 PyBullet 里加载，2 个移动副关节，网格齐全 |
 | 模型几何（行程 ↔ 开度） | ✅ 已验证 | `tests/test_model.py`，其中一条用例检查打包 xacro 的 `stroke` 默认值与 `STROKE_M` 一致 |
 | 限速运动 | ✅ 已验证 | `tests/test_sim.py`：全行程 1.00 s 斜坡 + 约 0.13 s 伺服稳定，无超调 |
 | 力上限与摩擦夹持 | ✅ 已验证 | `tests/test_sim.py`：10 N 夹持力下扛得住 5 N，15 N 会滑；且只有手指碰到工件 |

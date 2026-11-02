@@ -17,6 +17,15 @@ file and hands PyBullet that path:
 Anything it cannot rewrite (``$(find …)``, ``<xacro:if>``, macros …) raises
 :class:`UrdfError` instead of silently producing a wrong model.
 
+The bundled copy is a **frozen snapshot** of the older two-independent-finger
+model. It is not a verbatim sync of the current upstream description, which now
+exposes one master ``gripper_opening_joint`` and drives both fingers through
+``<mimic>``. This loader rejects the current upstream file at its
+``<xacro:if>`` block; even past that, PyBullet's URDF importer ignores
+``<mimic>``, so you would get one movable master joint and two fingers that
+never move. Keep using the bundled snapshot (or pass a two-joint URDF through
+``urdf_path``) unless you also add an explicit constraint for the coupling.
+
 Resolution order:
 
 1. the ``urdf_path`` argument (or ``$LITEGRIP_URDF_PATH`` for a file,

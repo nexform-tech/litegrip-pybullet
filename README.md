@@ -40,10 +40,13 @@ gripper at the same time.
 
 ### Simulation
 
-- **Bundled model**: the upstream ROS 2 xacro from `litegrip-description`, normalised
-  for PyBullet at load time (mesh paths rewritten, the massless root link
-  stripped) and shipped inside the package, so a fresh clone loads it with no
-  extra setup.
+- **Bundled model**: a frozen snapshot of the ROS 2 xacro from
+  `litegrip-description`, normalised for PyBullet at load time (mesh paths
+  rewritten, the massless root link stripped) and shipped inside the package, so
+  a fresh clone loads it with no extra setup. The snapshot keeps the older
+  two-independent-finger form because PyBullet's URDF importer ignores
+  `<mimic>`. The current upstream model drives both fingers from one master
+  joint; see [Related repositories](#related-repositories).
 - **One shared opening**: the only quantity the simulation and the hardware
   agree on is the normalised opening (0 closed … 1 wide open). Every other
   notation — joint travel, jaw gap, the SDK's calibrated millimetres — is
@@ -474,7 +477,7 @@ What has been verified, and what has not:
 
 | Capability | Status | Evidence |
 | --- | --- | --- |
-| URDF/xacro normalisation | ✅ Verified | `tests/test_urdf.py`: the upstream ROS 2 xacro loads in PyBullet, 2 prismatic joints, meshes present |
+| URDF/xacro normalisation | ✅ Verified | `tests/test_urdf.py`: the bundled two-finger snapshot loads in PyBullet, 2 prismatic joints, meshes present |
 | Model geometry (stroke ↔ opening) | ✅ Verified | `tests/test_model.py`, including a check that the bundled xacro's `stroke` default matches `STROKE_M` |
 | Speed-limited motion | ✅ Verified | `tests/test_sim.py`: full stroke 1.00 s of ramp + ~0.13 s of servo settling, no overshoot |
 | Force cap and friction grasping | ✅ Verified | `tests/test_sim.py`: holds 5 N against a 10 N grip, slips at 15 N; only the fingers touch the part |
